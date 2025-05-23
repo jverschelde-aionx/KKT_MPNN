@@ -1,0 +1,980 @@
+\documentclass{ou-report-vaf}
+\newcommand{\Loss}{\mathcal{L}}
+\citestyle{agu}
+\usepackage{float}
+\usepackage{pgfgantt}
+\usepackage{amsmath,amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% RQ3:Try different loss functions for obtain a feasible solution for RQ2
+
+% RQ3.A: can infeasible solutions be reused in order to guide the search towards feasible solutions
+
+% OR <> DL
+% DL multiple architecture possiblities
+% Change loss because of integer constraints
+
+
+% 20 +- papers for related work section
+% section motivating examples for this thesis after related work (3 abstract problems that you would normally solve usign OR)
+
+% What losses are used here? 
+
+% subdivide the related work section?:
+% GNNs
+% Type of losses in OR
+% SOTA OR approaches
+% - surveys about symetry breaking
+% - BnB/BnP/BnC
+
+% accessibility of the models?
+% Generic network that works for a (sub)set of integer problems
+% Completion of RQ1,2,3
+
+% GANTT chart for roadmap
+
+% VAF => 16 pages without appendix
+
+% Discuss 3 motivating use cases (standard vs our approach)
+
+% Table of risks,
+% 10 risks 
+% gravity, description, mitigation
+
+\begin{document}
+\pagenumbering{roman} % to prevent that the title page will be referred as page 1, which will give the warning that there is a page 1 twice.
+\pagestyle{plain}
+\title{Towards an End-to-End Neural-Based Framework for Integer Optimization}
+\author{Joachim Verschelde}
+
+\input{title}
+\pagenumbering{arabic} % to prevent that the title page will be referred as page 1, which will give the warning that there is a page 1 twice.
+
+\let\cleardoublepage\clearpage
+
+\section{Introduction}
+% In the introduction, you:
+
+% \begin{itemize}
+% 	\item motivate why this research is important. You can bring forward motivation with respect to society, or show that your research is scientifically interesting; preferrably both
+% 	\item give some background information
+% 	\item describe the goal of your research
+% 	\item give the reader an overview of the structure of the remainder of your report.
+% \end{itemize}
+
+% You can start your report by copying the introduction from your VAF. The advice is to rewrite the introduction \emph{after} you did write the remainder of the report. 
+
+% %This sentence is only here to show you how to refer to a source~\citep{Dijkstra-1968}.
+
+% \begin{table}[h!tbp]
+% \begin{tabular}{l | r | r| c}
+% kolom 1 & kolom 2 & kolom 3 & kolom 4 \\
+% \hline
+% zon & maan & ster & meteoor\\
+% gras & graan & groen & grauw\\
+% \end{tabular}
+% \caption{Example table}
+% \label{table-example}
+% \end{table}
+
+% Table~\ref{table-example} shows how to include a table. Note that the first column is left-justified, the right column is centered, and the other two columns are right-justified (because of the \texttt{\{l | r | r | c\}}). More information: \url{https://en.wikibooks.org/wiki/LaTeX/Tables}. 
+
+% \texttt{[h!tb]} means: preferrably place the table \emph{h}ere, and if that is not possible, at the \emph{t}op of the page, at the \emph{b}ottom, or on a separate \emph{page}. The same positioning advice can be used in figures. Figure~\ref{fig-example} is an example.
+
+% \begin{figure}[h!tbp]
+% \includegraphics[scale=0.5]{LaTeX.png}
+% \caption{LaTeX}
+% \label{fig-example}
+% \end{figure}
+
+% The following sections are an example of how you could structure your report. Do not hesitate to use a different structure!
+
+Linear programming and other mathematical optimization techniques, enable efficient solutions to tasks such as resource allocation, production scheduling, and routing. \\\\ Traditional solver-based approaches, suchs as the simplex method and interior-point method for linear programs and branch-and-bound-style approaches for mixed integer programming problems, typically rely on the problem structure to find a feasible solution. Each new problem instance is solved from scratch, which can be inefficient in contexts where similar instances recur or when decisions must be made in real-time \cite{kotary2021end}. In many practical scenarios (e.g. daily logistics with slowly changing data, or repeated simulations in a planning process), the type of problem instances share similar structural patterns. Recent work in Machine Learning integrates neural networks with optimization pipelines, because they offer the potential to learn the implicit structure of optimization problems from data \cite{kotary2021end} \cite{wu2023deep} \cite{nair2020solving} \cite{fischetti2018deep}.\\\\Broadly, two approaches are common.First, ML-augmented solvers integrate learned components into the traditional solving process \cite{qian2025towards}. For example, deep learning has been used to improve branch-and-bound decisions or cut selection in MILP solvers \cite{nair2020solving}, resulting in data-driven heuristics that complement existing algorithms. Second, end-to-end learning tries to directly predict the solution of an optimization problem using a neural network, essentially replacing the solver with a learned model \cite{kotary2021end} \cite{tang2024learning} \cite{lee2024rl}. End-to-end approaches integrate easily into larger ML pipelines (since the solver is just a differentiable neural network). However, they also introduce significant challenges: how do we ensure that a neural network’s output is feasible for a given problem instance? Most prior end-to-end methods struggle with these issues. Some require a large training set of solved instances (optimal solutions as labels) which is often expensive to obtain, while others resort to adding penalty terms for constraint violations or still rely on a conventional solver to repair or verify the network’s solution \cite{qian2025towards}. These gaps motivate our work: we seek a learning-based optimization approach that is fast, self-improving, and aware of the underlying optimization structure, producing solutions that respect the problem’s constraints.\\\\ In this paper, we propose an end-to-end neural-based framework for solving linear programs (LPs) and mixed-integer linear programs (MILPs) that addresses the above challenges. The core idea is to train a neural network to act as a solver: Given the description of an optimization instance, the network produces a candidate optimal solution. To guide the network toward valid solutions without requiring ground-truth labels for supervision, we incorporate the Karush-Kuhn-Tucker (KKT) conditions of optimality into the training objective. \\\\ The KKT conditions are a set of equations and inequalities that characterize optimal solutions to optimization problems. Under mild regularity conditions, any primal-dual solution satisfying KKT is guaranteed to be optimal. More information on the KKT-conditions can be found in the appendix \ref{LP-KKT-sec}. By minimizing a loss function that measures violation of KKT conditions, we provide a signal to our network: the loss is zero if and only if the output represents an optimal solution for the given LP. This allows us to train the network in an unsupervised way. The KKT objective residual becomes the loss signal so we have no need for explicit solution labels. Recent work has demonstrated the promise of this idea on simple LP examples \cite{arvind2024karush}, showing that training with KKT-based losses can outperform purely data-driven training in accuracy and generalization. Our framework extends this approach to MILPs. In addition to that, we will also replace the regular MLP from \cite{arvind2024karush} and use Graph Neural Networks (GNNs) to represent the input optimization problems. In contrast with regular MLP networks, GNNs can work with inputs of different sizes, generalizing beyond fixed-size inputs.
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[%
+  font=\small,
+  >=stealth,
+  rounded corners,
+  box/.style={
+    rectangle, 
+    draw=black, 
+    fill=gray!10, 
+    thick, 
+    align=center
+  }]
+
+%--- Nodes ---
+ % Input nodes
+    \node[draw,rounded corners,fill=blue!10] (c) {Objective $c$};
+    \node[draw,rounded corners,fill=blue!10,below=of c] (A) {Constraints $A$};
+    \node[draw,rounded corners,fill=blue!10,below=of A] (b) {RHS $b$};
+    \node[fit=(c)(A)(b),draw,dashed,inner sep=3pt,label={[yshift=1ex]left:Input}](input) {};
+
+
+
+\node[box, above=of input, fill=orange!10] (net1) {\textbf{GNN($A,b,c$)} \\ min $\Loss(x,u)$\\ Find LP-relaxation};
+\node[box, right= 2.5cm of net1] (bound) {$O_d =  c^\top x_{LP}$\\ $O_p = \delta \cdot O_d$ \\ Set starting bounds };
+\node[box, below=of bound, fill=orange!10] (net2) {\textbf{GNN($A,b,c,O_d,O_p$)}\\ min $\Loss_{\text{MILP}}(x)$ \\ Find integer solution};
+% Check solution and possibly update O_p
+\node[box, below=of net2] (check) {
+  \textbf{Better solution?}\\
+  If $c^\top x_{\text{MILP}} < O_p$
+};
+
+\node[fit=(bound)(net2)(check),draw,dashed,inner sep=3pt,label={[yshift=1ex]above:MILP extension}](milp_pipeline) {};
+
+\node[draw,rounded corners,below=1.2cm of check, fill=green!10, align=center] (sol) {
+  \textbf{Best solution} \\ $x^* \leftarrow x_{\text{MILP}}$};
+
+
+\draw [->] (input) -- node[anchor=east] {} (net1);
+\draw [->] (net1) -- node[anchor=north] {$(x,u)_{LP}$} (bound);
+\draw [->] (bound) -- node[anchor=east] {$O_d, O_p$} (net2);
+\draw [->] (net2) -- node[anchor=east]{ $x_{\text{MILP}}$} (check);
+\draw[->,rounded corners=3pt] 
+  (check.west) 
+                -- ++(-0.9,0) 
+                -- node[at end, left,align=right, rotate=90]{Yes \\ $O_p \leftarrow c^\top x_{\text{MILP}}$\\\\\\} ++(0,2.375)
+                -- (net2.west);
+\draw [->] (check) -- node[anchor=east]{No} (sol);
+
+\draw[->,rounded corners=3pt] 
+  (input.north) 
+                -- ++(0,0.5) 
+                -- ++(3.45,0) 
+                -- ++(0,-1.35)
+                -- (net2.west);
+\draw [->] (check) -- node[anchor=east]{No} (sol);
+\end{tikzpicture}
+\caption{A conceptual pipeline for solving MILPs with two GNNs. 
+First, \emph{GNN($A,b,c$)} solves the LP relaxation via a KKT-based loss, yielding a lower bound $O_d$. 
+An upper bound is then set as $O_p = \delta \cdot O_d$, and \emph{GNN($A,b,c,O_d,O_p$)} is used to find a feasible integer solution by minimizing a MILP-specific loss. 
+If a strictly better solution is found, $O_p$ is updated and the second GNN is repeated.}
+\label{fig:two-network-pipeline}
+\end{figure}
+In summary, our proposed framework combines deep learning techniques with mathematical optimization principles to solve LPs and MILPs in a novel way. Key contributions include the following:
+\begin{itemize}
+    \item \textbf{Graph-based encoding of LP/MILP instances.}
+          We use a bipartite GNN architecture \cite{lee2024rl} that embeds each instance’s
+          variable–constraint structure, giving the solver permutation
+          invariance and the ability to generalize to problems of unseen size.
+          This graph representation was not exploited by
+          \cite{arvind2024karush}
+
+    \item \textbf{Extension for MILPs.}
+          We extend the KKT-guided LP solver to MILPs by coupling two networks:
+          one predicts a tight lower bound from the LP relaxation, the other
+          projects to a feasible integer solution, iteratively tightening the
+          upper bound.
+
+    \item \textbf{Comprehensive empirical evaluation.}
+          We plan a thorough empirical evaluation of our framework on optimization problems of different sizes using common benchmarks such as NETLIB for LPs and MIPLIB for MILPs.
+\end{itemize}
+The remainder of this proposal is structured as follows. 
+In In Section~ \ref{sec:background}, we provide background on neural networks for linear/mixed-integer programming (MLPs, GNNs).
+In Section~\ref{sec:related_work}, we review the relevant literature on integrating neural networks with LP and MILP solvers. 
+Section~\ref{sec:research_questions} then formulates the specific research questions guiding our study. 
+Next, Section~\ref{section:Planning} details our methodology and planning, including the timeline and milestones for implementation. 
+Section~\ref{sec:risk-analysis} presents a risk analysis, enumerating potential challenges and mitigation strategies. 
+Finally, the appendix contains supplementary material, such as extended proofs and implementation details.
+% \\\\ In this proposal, we explore how to encode the Karush–Kuhn–Tucker (KKT) conditions \cite{KuhnTucker1951} for an LP as a single positive function and then minimize that function using a dedicated neural architecture. Concretely, we leverage the ReLU activation to systematically remove explicit inequalities, thereby enforcing nonnegativity, feasibility, and complementary slackness all within a single objective. The key insight is that if the KKT objective converges to zero, the associated primal and dual variables necessarily solve the original LP. By casting the entire problem as a  minimization of a sum of squared residuals, we can train the network in an unsupervised way. The KKT objective residual becomes the loss signal, with no need for explicit solution labels. \\\\ We then focus on constructing networks that respect the permutation invariance of our LP. Given a LP:
+% \begin{equation} \label{eq:LP_formulation_intro}
+% \min_{x} c^T x \quad \text{s.t.} \quad A\,x \le b  
+% \end{equation}
+% where 
+% \begin{equation}
+%     \begin{split}
+%         x &= (x_1,\dots,x_n)\\
+%         c &= (c_1,\dots,c_n)\\
+%         b &= (b_1,\dots,b_m)
+%     \end{split}
+% \end{equation}
+% We want a neural network architecture where permuting rows of $A$ or components of $x$ and $b$ does not affect the feasible region. A lot of research solves this by using Graph Neural Networks (GNNs) as they operate on bipartite graphs that split variables and constraints into distinct node sets \cite{gasse2019exact} \cite{khalil2022mip} \cite{mcdonald2024mixed} \cite{chen2022representing} \cite{qian2024exploring}. Through iterative message passing, a GNN can capture the relationships between $x$ and $Ax - b$ while automatically adapting to re-labeled or permuted inputs. \\\\ Our main goal is two-fold. First, we develop an neural network-based unsupervised solver for linear programs by minimizing the KKT residual. Second, we examine whether the same approach can be extended to mixed-integer linear programs (MILPs), where the lack of a continuous solution may require further architectural modifications. By building on a strong theoretical foundation of convex optimization, the KKT conditions and leveraging GNN-style permutation invariance, we hope to create a framework that is useful for solving a broad class of LP and MILP instances.
+
+% \subsection{Our contributions}
+% We can now summarize our potential core contributions in relation to existing methods:
+% \begin{enumerate}
+% \item Our proposal was inspired by the work of \cite{wu2023deep} where they use an ODE system of the KKT conditions as a method to update the loss of a neural network. Instead our approach introduces a novel loss function that encodes the KKT conditions directly. Later we found out that this was already done by \cite{arvind2024karush} for LPs.
+% \item  We extend this unsupervised KKT-based approach to mixed-integer linear programs, specifically, we propose a novel two-network pipeline: the first network handles the continuous relaxation to establish a lower bound, while the second network imposes integrality to find feasible integer solutions and refine an upper bound. This iterative scheme mirrors branch-and-bound but is executed entirely within a neural architecture.
+% \end{enumerate}
+
+\section{Background} \label{sec:background}
+%MAKE SKETCHES for a high level overview (can reuse figures form references)
+%CONNECT LP/MILP to NNs (to develop an high level idea for the audience that may not know NNs)
+% High level explain how NNs come find a solution using BP 
+% Explain the WHY (what are the reasons we want to investigate this ) Justify
+%Good example is Exact Combinatorial Optimization with Graph Convolutional Neural Networks
+\subsection{Multi-layer perceptrons}
+\subsubsection{Forward-pass}
+Feedforward neural networks, or multi-layer perceptrons (MLPs), consist of layers of fully connected neurons that transform an input vector through weighted sums and nonlinear activation functions. Such networks require the input to be of a fixed size determined at training time. Consider follwing linear program in canonical form:
+\begin{equation}
+\begin{split}
+    \min_{x}  c^\intercal x \\
+\text{subject to} \quad A\,x \leq b
+\end{split}
+\end{equation}
+ A straightforward approach would be to encode the objective coefficients $c$, constraint coefficients $A$ and right-hand sides $b$ as a single flat vector $\Bar{x}$ and feed it into an MLP. Each neuron in the first layer will take a weighted sum of the input vector  non-linear activation function to calculate the  $\Bar{x}$. The MLP would then be trained to predict the optimal objective value or decision variables (or an approximation).
+\begin{figure}[ht]
+    \centering
+    \begin{tikzpicture}[
+        neuron/.style={circle, draw, minimum size=2.6em, inner sep=0pt},
+        layer/.style={node distance=20mm},
+        every path/.style={->, >=latex}
+    ]
+        %--- input layer (3 nodes) ---
+        \node[neuron] (I-1)                    {$\Bar{x}_1$};
+        \node[neuron, below=of I-1] (I-2)      {$\Bar{x}_2$};
+        
+        %--- hidden layer 1 (5 nodes) ---
+        \node[neuron, right=of I-2] (H-1-3) {$h^{(\ell_1)}_3$};
+        \node[neuron, above=of H-1-3] (H-1-2) {$h^{(\ell_1)}_2$};
+        \node[neuron, above=of H-1-2] (H-1-1) {$h^{(\ell_1)}_1$};
+        \node[neuron, below=of H-1-3] (H-1-4) {$h^{(\ell_1)}_4$};
+        
+        %--- hidden layer 2 (5 nodes) ---
+        \node[neuron, right=of H-1-3] (H-2-3) {$h^{(\ell_2)}_3$};
+        \node[neuron, right=of H-1-2] (H-2-2) {$h^{(\ell_2)}_2$};
+        \node[neuron, right=of H-1-1] (H-2-1) {$h^{(\ell_2)}_1$};
+        \node[neuron, right=of H-1-4] (H-2-4) {$h^{(\ell_2)}_4$};
+        
+        %--- output layer (2 nodes) ---
+        \node[neuron, right=of H-2-2] (O-1) {$\hat{y}_1$};
+        \node[neuron, below=of O-1] (O-2) {$\hat{y}_2$};
+        
+        %--- connections: input → hidden 1
+        \foreach \i in {1,...,2}{
+            \foreach \h in {1,...,4}{
+                \draw (I-\i) -- (H-1-\h);
+            }
+        }
+
+        %--- connections: hidden 1 → hidden 2
+        \foreach \i in {1,...,4}{
+            \foreach \h in {1,...,4}{
+                \draw (H-1-\i) -- (H-2-\h);
+            }
+        }
+        
+        %--- connections: hidden 2 → output
+        \foreach \h in {1,...,4}{
+            \foreach \o in {1,...,2}{
+                \draw (H-2-\h) -- (O-\o);
+            }
+        }
+        
+    \end{tikzpicture}
+    \caption{A simple feed-forward multilayer perceptron with 2 hidden layers.}
+    \label{fig:mlp}
+\end{figure}
+\textbf{}Let $L$ be the number of hidden layers and for convenience let $h^{(0)} =\bar{x}$.  For every layer $\ell\in\{{1,\dots ,L}\}$ we have weight matrix $W^{(\ell)}\in\mathbb{R}^{d_{\ell}\times d_{\ell-1}}$ and bias $b^{(\ell)}\in\mathbb{R}^{d_{\ell}}$.  The activation of layer~$\ell$ is given by
+\begin{equation}
+h^{(\ell)} = \sigma(W^{(\ell)} h^{(\ell-1)} + b^{(\ell)})
+\end{equation}
+\label{eq:mlp_layer}
+where $\sigma$ is a non‑linear activation such as \textsc{relu} or $\tanh$.  For example the network's output is obtained in the following way:
+\begin{equation}
+\hat{y} = \sigma(W^{(\ell_3)} h^{(\ell_2)} + b^{(\ell_2)})
+\label{eq:mlp_output}
+\end{equation}
+\subsubsection{Backward-pass}
+At the start of training, the weight matrices $W^{(\ell)}$ and bias vectors $b^{(\ell)}$ of each layer~$\ell$ are randomly initialized. Given a training set of $N$ examples $\{(\bar{x}^{(1)},y^{(1)}), \dots, (\bar{x}^{(N)},y^{(N)})\}$ we seek to learn the parameters by minimizing an average loss:
+\begin{equation}
+\min_{W,b} \;\mathcal{L}(\hat{y},y) \;=\; \frac{1}{N}\sum_{i=1}^N 
+L\bigl(\hat{y}^{(i)},\,y^{(i)}\bigr),
+\label{eq:average_loss}
+\end{equation}
+where $L(\cdot,\cdot)$ is a suitable loss function, such as mean-squared error or cross-entropy. To optimize the network parameters, we employ gradient descent. The key step is to compute the gradient of the loss \(\mathcal{L}\) with respect to each parameter \(W^{(\ell)}\) and \(b^{(\ell)}\), working backwards from the output layer to the input layer via back‑propagation. This procedure applies the chain rule layer by layer; for each \(\ell \in \{L, \dots, 1\}\)
+\[
+W^{(\ell)} \leftarrow W^{(\ell)} \;-\; \alpha \,\frac{\partial \mathcal{L}}{\partial W^{(\ell)}},
+\quad
+b^{(\ell)} \leftarrow b^{(\ell)} \;-\; \alpha \,\frac{\partial \mathcal{L}}{\partial b^{(\ell)}},
+\]
+where \(\alpha\) is the learning rate, and 
+\(\tfrac{\partial \mathcal{L}}{\partial W^{(\ell)}}\), 
+\(\tfrac{\partial \mathcal{L}}{\partial b^{(\ell)}}\)
+are obtained by successively applying the chain rule through all subsequent layers. By iterating this update procedure multiple times, the network parameters are gradually refined so that the network’s predictions \(\hat{y}\) better fit the solutions to the problem instances.
+
+\subsection{Graph Neural Networks}\label{sec:gnns}
+
+Graph Neural Networks offer a powerful way to encode optimization instances of varying sizes. Instead of flattening problem data into a single fixed-length vector (as with MLPs), GNNs represent each instance as a graph whose nodes and edges reflect the problem’s structure as can be seen in figure \ref{fig_bipartite}. A typical example in the MILP context is the bipartite graph representation, which treats decision variables and constraints as two distinct sets of nodes \cite{nair2020solving} \cite{lee2024rl}.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.8\textwidth]{figures/bipartite.png}
+  \caption{A small MILP (left) with its coefficient matrix $A$ in the middle.
+Rows (constraints) become red nodes $a_1,a_2$, while columns (variables) become blue nodes $x_1,x_2,x_3$. Edges represent nonzero $A_{ij}$.}
+\label{fig_bipartite}
+\end{figure}
+
+\subsubsection{Bipartite GNN architecture}
+To construct the bipartite graph, one set of nodes corresponds to the constraints (rows of $A$) and the other set corresponds to the decision variables (columns). An edge exists between a constraint node and a variable node if and only if the corresponding coefficient in $A$ is nonzero. Each node then holds features (e.g., objective coefficients $c_j$, right-hand sides $b_i$, or bounds), and during message passing, constraints pass information to variables and variables pass information back to constraints. This two-way flow of information helps the network learn to minimize violations, guide feasibility, and push solutions toward optimality.
+
+\subsubsection{Permutation invariance}
+Since GNNs process nodes based on their connectivity rather than relying on a specific node ordering, the architecture is invariant to permutations. This is especially useful for MILPs, where the labeling or order of constraints and variables should not affect the solution. Whereas MLP inputs must be ordered in some way (and shuffling the input could produce different outputs), GNNs aggregate messages from neighbors in a symmetric fashion (e.g., summation or averaging), ensuring the model’s output remains consistent regardless of how the problem is indexed.
+\section{Related Work} \label{sec:related_work}
+\subsection{Linear Programs}
+\cite{wu2023deep} used the KKT conditions explicitly. The KKT conditions are employed as (boundary) conditions for a first-order ODE (dynamic system). The idea is that this dynamic system converges, as $t \to \infty$, to a state that satisfies the KKT conditions. It is claimed that the solution can thus be found. However, for each LP, a new neural network must be trained, which makes the method very slow and computationally intensive. \\
+\cite{chen2022representing} have modeled an LP as a bipartite GNN. Their goal is to generally study solution methods for LPs via bipartite GNNs. However, no concrete guidelines are provided on how this GNN should be trained exactly. It also remains unclear how the objective values and solutions can be reliably determined from the network. GNNs are illustrated for LPs with 10 variables and 50 inequalities, which then generate “feasibility”, objective value, and a solution. The GNNs are trained via supervised learning, with the solver SCIP serving as ground truth. \\
+\cite{qian2024exploring} provide an explanation (interpretation) of how GNNs can be used to solve LPs. Concretely, the Message Passing steps in the GNN are viewed as the steps of an interior-point algorithm. The GNN is trained with supervised learning, based on solutions generated by a solver (using an interior-point method).
+\subsection{Mixed Integer Linear Programs}
+\cite{scavuzzo2024machine} reviewed the current literature on the use of Machine Learning for MILP. In it, several approaches are discussed and different methods are compared. They broadly distinguish:
+\begin{enumerate}
+\item Primal heuristics
+\item Branch and Bound
+\item Cutting planes
+\end{enumerate}
+\subsubsection{Primal heuristics}
+A GNN is used here to solve a (sub)part of the problem, corresponding to “stable” variables. The subproblem with the remaining variables is then solved by a solver (usually SCIP). It has been established that for many binary MILPs, in numerous feasible solutions, certain variables consistently take the same values in all (or in most) feasible solutions. These are called stable variables.
+Several GNNs have thus been built to predict these stable variables, after which the other variables in a subproblem are determined by a solver. \\
+\cite{ding2020accelerating} trained a GNN with attention via supervised learning to predict the stable variables. A (binary) cross-entropy is used as the loss function. A local branching step in SCIP is used to determine the remaining variables.\\
+\cite{nair2020solving} introduced a novel GNN architecture consisting of two components: Neural Diving and Neural Branching. The Neural Diving is a primal heuristic similar to that of \cite{ding2020accelerating}, but they use a different loss function, in which the binary label probability (the probability distribution over the stable variables) is adjusted.\\\\
+We have seen in the literature that there are GNN methods that, for example, train on interior-point solutions (cf. \cite{qian2024exploring}) or use KKT conditions (cf. \cite{wu2023deep}), but these are relatively slow. The target probability distribution is given by:
+\begin{equation}
+P_T\bigl(x^k\bigr)=\frac{\exp\bigl(-\,c^\top x^k\bigr)}{\displaystyle \sum_{i=1}^{K}\exp\bigl(-\,c^\top x^i\bigr)},    
+\end{equation}
+where $\{x^1, x^2, \ldots, x^K\}$ is a set of $K$ feasible solutions.\\
+This way, feasible solutions are generated near a (potentially) lower objective value.
+The Neural Branching GNN aims to predict which variables will undergo Full Strong Branching, so that the root search tree remains as small as possible. Imitation learning is used here, following the expert policy from SCIP.\\
+\cite{khalil2022mip}'s approach also uses a GNN and closely aligns with the work of \cite{ding2020accelerating} As the target probability distribution, the average value of the binary variables is used:
+\begin{equation}
+P_T(x_j = 1) = \frac{1}{K} \sum_{k=1}^{K} x_j^k.    
+\end{equation}
+These approaches are only semi end-to-end in the sense that part of the MILP is determined by the neural network, but a solver is still needed to complete the solution.
+
+
+\subsubsection{Branch and Bound}
+These approaches are not end-to-end at all and only assist the solver in making good decisions during the branch-and-bound algorithm.
+\cite{gasse2019exact} use a bipartite GNN to help solve MILPs. The GNN predicts the variable on which to branch. Learning is done via imitation learning, using a solver (SCIP) to obtain the “correct” branching variables as examples.\\
+\cite{zarpellon2021parameterizing} do not use a representation of the MILP itself (A, B, c) but rather of the B\&B search tree. The authors state that this approach generalizes better beyond the trained classes of combinatorial optimization problems. The expert used is SCIP’s hybrid-branching expert.\\
+\cite{lin2022learning} continue in the same vein as \cite{zarpellon2021parameterizing}: branching decisions are predicted based on the description of the branch-and-bound search tree and thus not directly on the MILP parameters. The neural network used is a transformer, and multitask learning is employed, with SCIP as the expert.
+\subsubsection{Cutting planes}
+Cutting-plane methods are part of modern MILP solvers. In so-called separation rounds, cuts are selected according to certain criteria and added to the original MILP so that the previous LP is no longer feasible. 
+
+Since a cutting-plane method as described bove is not used in ML for cut selection (which is usually based on imitation learning with a solver as the expert), and since a cutting-plane method as a standalone method to solve MILPs is not feasible, the literature on this topic is not really relevant to our goal of developing an end-to-end ML method for MILPs.
+
+\subsection{End to End Methods}
+
+End-to-end ML methods for solving MILPs are very recent. The method of  \cite{tang2024learning} is quite elegant and consists of a NN that solves the relaxation LP $\to$ followed by a constraint layer that projects the constructed solution onto integer values. The entire network is trained according to a loss function that aims to minimize the objective function as much as possible, while imposing a penalty for violation of the inequalities:
+
+\begin{equation}
+\Loss = \frac{1}{m} \sum_{i=1}^{m} \Bigl( f(x^i,\xi^i) \Bigr)
+    + \lambda \Bigl\| \mathrm{ReLU}\bigl(g(x^i,\xi^i)\bigr)\Bigr\|^2    
+\end{equation}
+where $f$ and $g$ are the objective function and the inequality constraints, respectively, which are not necessarily linear. The NN is a network with 5 fully connected layers, whose width is adapted to the size of the MILP. Thus, the NN does not really generalize to larger MILPs.\\\\
+\cite{lee2024rl} use RL to solve a MILP. The action $A_t = (a_{t,1}, a_{t,2}, \ldots, a_{t,m})$ of the $m$ integer variables, where $a_{t,i}(\pm 1)$, corresponds to the decision whether the $i$-th variable remains the same or is increased or decreased by 1. It is clear that a feasible solution must first be found and only then can that feasible solution be optimized. This system therefore works in two phases. In the first phase, a positive reward is given if the number of inequality violations is reduced, regardless of the objective value, until a good feasible solution is reached. In the second phase, improving the objective value is rewarded, whereas if inequality violations occur again, reducing the number of violations is once again rewarded. The NN used is a GNN.\\
+\cite{donti2021dc3} introduce a Lagrangian penalty method for imposing feasibility. The method applies to general non-linear problems, and therefore also to LPs. However, feasibility (satisfying the inequalities) is limited to real-valued variables. The method is unsupervised and is based on the following loss function:
+\begin{equation}
+\Loss = f(x) + \lambda \, \bigl\|\mathrm{ReLU}\bigl(g^*(y)\bigr)\bigr\|^2    
+\end{equation} where $f$ is the objective function and $g$ the inequalities. This NN is a fully connected network with 2 hidden layers of width 200. Hence, this NN does not generalize to much larger instances either.
+\subsection{Data set generation}
+Generating feasible LPs or MILPs is a non-trivial problem. Many papers rely on the MILP form of CO problems that are relaxed for LPs, thereby ensuring feasibility. For example, in the paper of \cite{qian2024exploring}, instances for 4 types of CO problems are generated: the set cover problem, the maximum independent set problem, the combinatorial auction problem, and the capacitated facility location problem. This yields a broad class of MILPs/LPs. Likewise, \cite{nair2020solving} use MILPs from data sources such as MIPLIB and Google Production Planning. However, if one requires an even broader range of MILPs as a dataset, another approach is needed. For example \cite{wang2023dig} or \cite{zhang2024milp} [TODO describe papers]\\
+Similarly, \cite{li2024towards} introduce MILP-Evolve, an LLM-based data-generation pipeline that produces various MILP blocks and instances from a limited set of seed-MILP combinations through prompting, tailored specifically to the MILP domain. By adjusting and refining prompts, the LLM can create new and diverse MILP blocks that deviate significantly from the original examples. By basing the prompts on realistic scenarios and industrial applications, the relevance and diversity of the generated MILP blocks is increased. GPT-4 is used as the LLM. Since our intention is to focus on developing a new end-to-end method (based on a new self-supervised/unsupervised learning approach with a new loss function), we will limit ourselves dataset-wise to these new Qian et al. or Nair et al. We will not delve further into these new developments in MILP instance generation.
+
+% \subsection{Positioning our research proposal relative to the mentioned methods}
+% Our proposal is a GNN with attention that uses unsupervised learning based on a loss function whose minimum corresponds to the KKT conditions for LPs and to feasible solutions for MILPs. Thus, it is an end-to-end method. Our proposal is related to the proposal of \cite{khalil2022mip}, but fundamentally differs in two key points:
+
+%\begin{enumerate}
+%\item In Khalil’s method, the loss function is an augmented Lagrangian that seeks a trade-off between the lowest possible objective value and as few inequality violations as possible. The minimum of their loss function for LPs does not yield an exact solution, because the inequalities are imposed with a Lagrange multiplier (their hyperparameter). Our KKT loss function has 0 as the exact minimum at the exact solution. Moreover, the way in which the LP relaxation/integer feasibility is imposed in Khalil’s method is not exact. Our MILP loss function and the algorithm—which, among other things, iteratively attempts to lower the primal bound—are designed so that it can in principle deliver the exact minimum (for a specific instance).
+
+%\item The objective of our proposal is to investigate how well the loss function and algorithm work when applied to a distribution of MILPs during training of a GNN. With regard to \cite{lin2022learning}, the other end-to-end method uses an RL approach with a reward that encourages reducing the number of inequality violations and achieving the lowest possible objective value. Although this reward function apparently works, it is somewhat ad hoc. In principle, one could replace our loss function with a reward function for an RL learning strategy, and it would be interesting to explore this line of thinking in the future.
+%\end{enumerate}
+
+%In the introduction, you described the overall goal of your research.
+%Here, you formulate your research questions, and you explain them.
+
+%Note that your research questions must be formulated in such a way that you will be able to give meaningful answers in the conclusions of your thesis (for instance, you should not be able to answer with yes or no). Your questions will probably begin with what, how, when, how many, why, and so on.
+
+%In most cases, one main research question with several subquestions works best.
+\section{Research Questions} \label{sec:research_questions}
+\subsection{Encoding the KKT Conditions of a Linear Program via a GNN architecture}
+The first research question is the following: 
+\begin{quote}
+   \textbf{ RQ1: Can we model the KKT-conditions of a linear program (LP) as a minimization problem using a graph neural network architecture?}
+\end{quote}
+In a classical linear program defined by:
+\[
+\min_{x}  c^\intercal x 
+\quad \text{subject to} \quad 
+A\,x \leq b,
+\]
+the Karush--Kuhn--Tucker (KKT) conditions \cite{KuhnTucker1951} introduce Lagrange multipliers $u \ge 0$ and state that optimal solutions $(x^*,u^*)$ must satisfy
+
+\begin{equation} \label{formula:KKT}
+\begin{cases}
+A^{\intercal}\,u + c = 0,\\
+A x - b \le 0,\\
+(A x - b)_i\,u_i = 0 \quad \forall\,i,\\
+u_i \ge 0 \quad \forall\,i.
+\end{cases}    
+\end{equation}
+One way to remove explicit inequalities is to use the ReLU function first introduced by \cite{fukushima1975cognitron}:
+\[
+\mathrm{ReLU}(z) = \max(0,z).
+\]
+The main intuïtion is that $\mathrm{ReLU}(A x-b) = 0 \iff A x - b \le 0.$ Furthermore, we can rewrite $u_i \ge 0 \quad \forall\,i$ as $\mathrm{ReLU}(-u_i) = 0$. This way, we can rewrite all KKT conditions as equalities.
+To encode these KKT conditions as a minimization problem, we propose a positive objective:
+\begin{equation}\label{LP:loss_function}
+\Loss (x,u) = \sum_{i=1}^n (A^{\intercal} u + c)_{i}^{2} + \sum_{j=1}^m \mathrm{ReLU}\bigl((Ax-b)_j\bigr) + \sum_{j=1}^m \mathrm{ReLU}(-u_j) + \sum_{j=1}^m u_j^{2}(Ax-b)_{j}^{2}
+\end{equation}
+Each term is nonnegative and vanishes only when the respective KKT condition is exactly satisfied. It is easy to show that this objective has no local minima and is exactly zero at the optimal solution. Therefore, if a neural network is designed to generate $(x,u)$ and the above function is used as a loss, then $\nabla \Loss(x,u)=0$ forces the solution to meet all KKT conditions. A proof for this is included in the appendix \ref{proof:no_local_minima}.
+More specifically we want to:
+\begin{itemize}
+    \item Demonstrate that we can design a graph neural network to output feasible $(x,u)$ that minimize $\Loss(x,u)$ for optimization problems of different sizes.
+    \item Compare the solver performance (both in accuracy and runtime) to classical LP solvers.
+\end{itemize}
+
+\subsection{Moving to MILP - Reusing the Same Architecture}
+The second research question investigates if we can reuse the architecture from RQ1 for MILPs:
+\begin{quote}
+    \textbf{RQ2: Can we reuse the architecture from RQ1 for mixed-integer linear programs? If so, what modifications are required?}
+\end{quote}
+A mixed-integer linear program has the form:
+\begin{equation}
+\min_{x} c^\intercal x 
+\quad \text{subject to} \quad 
+A\,x \le b, 
+\quad x_i \in \{0,1\} \text{ or } \mathbb{Z},    
+\end{equation}
+where a subset (or all) of the decision variables are constrained to be integral. Although one may still use the KKT-based approach for the continuous relaxation, integrality constraints add complexity. Naively, a continuous relaxation will not enforce $x_i \in \{0,1\}$; we need additional terms in the objective (or specialized layers) to push $x_i$ to integers. \\\\ 
+One popular penalty for enforcing binary solutions is:
+\[
+\sum_{i=1}^n x_i^2 (1 - x_i)^2,
+\]
+which vanishes only if $x_i$ is exactly 0 or 1. We can then combine this term with the KKT-based penalty for the continuous portion. However, MILPs are mostly solved using a branch-and-bound style search, where feasible integral solutions provide improved upper bounds, and one prunes regions that cannot yield better solutions. Our approach will be the following:
+\begin{enumerate}
+    \item Solve the LP relaxation of the MILP. 
+    \item Use the resulting continuous solution to derive a lower bound $O_d$. 
+    \item Impose an upper bound $O_p = \delta \cdot O_d$ that guides the network to feasible integer points with $O_d \le c^{\intercal} x \le O_p$. 
+    \item Iterate and refine, lowering $O_p$ whenever we discover a better feasible integer solution.
+\end{enumerate}
+
+
+\begin{algorithm}[H]
+\caption{Iterative MILP Algorithm}
+\begin{algorithmic}[1]
+  \State \textbf{Input}: 
+    MILP instance $(A,b,c)$, 
+    an LP‐relaxation solution $x_{\text{LP}}$ 
+    and a parameter $\delta$ to expand the search interval.
+  \State $O_d \gets c^T x_{\text{LP}}$ 
+  \State $O_p \gets O_d \,\bigl(1 + \delta\bigr)$
+  \State $x_{\text{old}} \gets x_{\text{LP}}$
+  \While{true}
+    \State $x_{\text{new}} \gets \mathrm{GNN}(A,\,b,\,c,\,O_d,\,O_p)$
+          \Comment{Obtain a candidate solution within $[O_d,O_p]$}
+    \State $O_p \gets c^T x_{\text{new}}$
+    \If{%
+      $\displaystyle
+        \frac{c^T x_{\text{new}} - c^T x_{\text{old}}}
+             {c^T x_{\text{old}}}
+        >\epsilon
+      $}
+      \State $x_{\text{old}} \gets x_{\text{new}}$
+    \Else
+      \State \textbf{break} \quad \Comment{Stop if improvement is below threshold}
+    \EndIf
+  \EndWhile
+  \State $x^* \gets x_{\text{new}}$ \quad \Comment{Final solution}
+\end{algorithmic}
+\end{algorithm}
+GNN\,$(A,b,c,O_d,O_p)$ refers to a (graph neural‐network‐based) procedure or model whose feasible solutions 
+$x$ satisfy
+\begin{equation}
+    \begin{split}
+         A\,x - b &\le 0, \\
+  x_n &\in \{0,1\}, \quad \text{for each integer index }n,\\
+  O_d \le c^T x &\le O_p, 
+    \end{split}
+\end{equation}
+where 
+\begin{equation}
+  O_d = \text{dual bound}, 
+  \quad
+  O_p = \text{primal bound}.  
+\end{equation}
+A suitable loss function for driving a neural network toward such feasible $x$ could be
+\begin{equation}
+\Loss_{\text{MILP}}(x) = \sum_{j=1}^m \mathrm{ReLU}\bigl((A x - b)_j\bigr)
+  + \mathrm{ReLU}\bigl(-c^{\intercal} x + O_{d}\bigr)
+  + \mathrm{ReLU}\bigl(c^{\intercal} x - O_{p}\bigr)
+  + \sum_{i=1}^n x_i^2 \,\bigl(1 - x_i\bigr)^2
+\end{equation}
+When $x$ is truly feasible and $c^T x$ lies between $O_d$ and $O_p,$ the above terms vanish and $\Loss_{\text{MILP}}(x)$ can reach $0.$\\\\
+A more formal explanation for this system can be found in the appendix \ref{MILP:appendix}.
+RQ2 explores whether the same architecture can be extended straightforwardly to the discrete case by adding an integrality penalty and a bounding strategy.
+
+\subsection{Reusing Infeasible Solutions to Guide the Search}
+
+Another interesting question is:
+\begin{quote}
+    \textbf{RQ3: Can infeasible solutions be reused in order to guide the search towards feasible solutions?}
+\end{quote}
+In regular optimization solvers, an infeasible solution indicates a dead end, either the solver backtracks or adds a cut. In our neural-based approach, however, an infeasible solution might carry important gradient information. For example, large constraint violations could produce strong gradients that can guide how to adjust $x$ in a subsequent iteration. Thus, rather than discarding infeasible iterates, we may:
+\begin{itemize}
+    \item Store them in a experience replay buffer \cite{lin1992self}.
+    \item Re-initialize the network from an infeasible point to see if small changes can make it feasible.
+    \item Use them to weight certain constraints that are violated more frequently, which in turn increases feasibility.
+\end{itemize}
+Here we examine whether reuse of infeasible solutions can improve convergence rates, reduce the number of infeasible attempts, or yield better final solutions. The idea for this comes from reinforcement learning where prioritized replay buffers contain experiences that yield a larger error are given higher sampling probability \cite{schaul2015prioritized}.
+
+\section{Planning}\label{section:Planning}
+% The plan to compare the results of SCIP, kktnets and our approach%
+% Researching is taking a plunge into the unknown. A detailed planning is, therefore, not possible.
+
+% Try to know, at least, what you will do during the first weeks, and show roughly how you imagine to go on from then.
+
+% You might consider mentioning deliverables that you deliver at certain milestones.
+% Initial Setup
+% - Setup the environment for a neural network architecture 0.5
+% - Look for a third party python dataloader for the NETLIB LP benchmark to load small to medium sized LPs 0.5
+% - Setup existing GNN from GitHub https://github.com/chendiqian/IPM_MPNN for example 2
+% - Further define evaluation metrics 1
+
+% Create Network Architecture for LPs
+% - Create the first variant of the GNN architecture to use our custom loss function \Loss(x,u) for LPs 3
+% - Solve the LP problems using the traditional solver SCIP 2
+% - Record performance of both methods on the LP benchmark 1
+
+% Upgrade Architecture for MILP
+% - Create the second NN for MILP  to use the custom function \Loss_{MILP}(x) 1
+% - Look for a third party python dataloader for the MILPLIB benchmark 1
+% - Implement the custom optimization loop with the 2 networks 3
+% - Solve the MILPS using SCIP 2
+% - Record performance of both methods on the MILPLIB benchmark 1
+% - write Paper 1
+
+% Learn from Infeasible Solutions
+% - Look to implement the prioritized replay buffer 2
+% - Update the optimization loop and training pipeline 1
+% - Compare performance of the approach with or without reusing infeasible solutions  1
+% - Write results and evaluation 1
+
+% Finish up:
+% - Finalizing the paper 2
+
+\subsection{Overview}
+This planning outlines the step-by-step process for our research project, running from the start of April until the end of September which is a total of 26 weeks. The primary objective is to investigate how to encode the KKT conditions for LPs and then adapt the same framework for MILPs. We also explore how infeasible solutions can guide improved optimization performance. The plan is divided into four phases and 
+ a final wrap-up.
+
+\begin{figure}[htbp]
+    \begin{center}
+    
+    \begin{ganttchart}[y unit title=0.4cm,
+    y unit chart=0.5cm,
+    vgrid,hgrid, 
+    title label anchor/.style={below=-1.6ex},
+    title left shift=.05,
+    title right shift=-.05,
+    title height=1,
+    progress label text={},
+    bar height=0.7,
+    group right shift=0,
+    group top shift=.6,
+    group height=.3]{1}{26}
+    %labels
+    \gantttitle{Month}{26} \\
+    \gantttitle{April}{4} 
+    \gantttitle{May}{4} 
+    \gantttitle{June}{4} 
+    \gantttitle{July}{5} 
+    \gantttitle{August}{5} 
+    \gantttitle{September}{4} \\
+    %tasks
+    \ganttbar{Initial Setup}{1}{4} \\
+    \ganttbar{NNs for LP}{5}{10} \\
+    \ganttbar{Upgrade To MILP}{11}{19} \\
+    \ganttbar{Infeasible Solutions }{20}{24} \\
+    \ganttbar{Finish up}{25}{26} \\
+    
+   
+    \end{ganttchart}
+    \end{center}
+    \caption{Gantt chart visualising the planning outline for the research project}
+
+\end{figure}
+
+\subsection{Initial Setup}
+
+\subsubsection{Set up the environment for a neural network architecture}
+In early April, we will prepare the software and hardware environment required for development. This includes setting up a docker container with a certain base image containing Python, NumPy, PyTorch, SciPy, SCIP and the CUDA toolkit needed for accelerated training.
+
+\subsubsection{Look for a third-party Python dataloader for the NETLIB LP benchmark}
+Simultaneously, we will search for an existing Python library to load small- to medium-scale linear programs from the NETLIB benchmark. If no sufficiently robust loader exists, we will implement a minimal dataloader ourself.
+
+\subsubsection{Set up the existing GNN from GitHub}
+We will spend the next 2 weeks exploring existing GNN architectures such as \\ \texttt{https://github.com/chendiqian/IPM\_MPNN}. Further more we will need to setup the dependencies for the GNN repository in our docker container. Other tasks may be the exploration of the GNN layers and see how the data flows from input to output or plan how to integrate our custom loss function.
+
+\subsubsection{Further define evaluation metrics}
+Finally, we will determine how to measure our solver's performance and compare it to a baseline solver like SCIP. Possible metrics could be:
+\begin{itemize}
+\item Feasibility rate
+\item Optimality gap
+\item Runtime performance
+\item Scalability with respect to problem size
+\end{itemize}
+By the end of Week 4, the environment will be set, a NETLIB loader in place, the GNN cloned and running, and all metrics clearly defined.
+\subsection{Create Network Architecture for LPs}
+
+\subsubsection{First variant of the GNN with custom loss $\Loss(x,u)$}
+In Weeks 5--7, we will develop our initial network to handle LPs. Our custom loss function that
+encodes the KKT conditions \ref{LP:loss_function}. This means implementing the loss function $\Loss(x,u)$ within the GNN training loop. Next we need to verify if the gradients are computed correctly and the training is stable. Finally we may need to adjust GNN layers or hyperparameters (batch size, learning rate, etc.).
+
+\subsubsection{Solve the LP problems using SCIP}
+While building and testing the network, we will also run SCIP on each NETLIB instance over approximately two weeks. This provides a reliable baseline and the results will serve as ground truth when comparing our neural approach.
+
+\subsubsection{Record performance}
+By Week 10 we will generate tables and plots showing:
+\begin{itemize}
+\item Objective gaps relative to SCIP solutions
+\item Feasibility rates
+\item Time-to-convergence comparisons
+\end{itemize}
+The results will indicate whether our neural approach is competitive in both accuracy and runtime, providing insights on required refinements.
+
+\subsection{Upgrade Architecture for MILP}
+
+\subsubsection{Second NN with custom function $\Loss_{\text{MILP}}(x)$}
+Next, we shift focus to MILPs and we extend our architecture for handling integrality constraints using a second NN with our updated loss function.
+
+\subsubsection{Search for a third-party Python dataloader for MILPLIB}
+In parallel, we will look for or adapt an existing loader for MILPLIB. The goal is to replicate our NETLIB workflow but for MILP instances.
+
+\subsubsection{Implement a custom optimization loop}
+Over the next three weeks, we will code a our training loop that:
+\begin{itemize}
+\item Runs our first network to get $x_{LP}^*$ and sets $O_d = c^{\top} x_{LP}^*$.
+\item Initializes $O_p = \delta \times O_d$ for some $\delta > 1$.
+\item Trains the MILP network to find integer-feasible solutions with $c^{\top} x \le O_p$.
+\item Iteratively lowers $O_p$ whenever an improved solution is found.
+\end{itemize}
+
+\subsubsection{Solve the MILPs using SCIP}
+We will also solve the MILPs from MILPLIB using SCIP. This step should confirm whether our approach competes with standard MILP solvers.
+
+\subsubsection{Record performance}
+For the next week we will compare results from our approach versus SCIP. Important observations could be:
+\begin{itemize}
+\item Feasibility of integer solutions
+\item Quality of the objective values found
+\item Overall runtime
+\end{itemize}
+By Week 19, we should have a clear sense of how well the KKT-inspired architecture generalizes to the MILP setting.
+\subsubsection{Write paper}
+We also plan to start drafting our paper around Week 19 and bundeling the results that we already collected.
+\subsection{Learn from Infeasible Solutions}
+\subsubsection{Implement a prioritized replay buffer}
+Addressing the question of reusing infeasible solutions, we will implement a replay mechanism where solutions with large constraint violations or errors are sampled more often during training. This approach, borrowed from reinforcement learning, can push the network to learn corrections for typical pitfalls more rapidly.
+
+\subsubsection{Update the optimization loop and training pipeline}
+Next, we will integrate this buffer into our existing LP and MILP loops. We will:
+\begin{itemize}
+\item Retain infeasible samples instead of discarding them.
+\item Assign sampling priorities based on the magnitude of constraint violations.
+\item Regularly sample from the buffer and update the network’s parameters.
+\end{itemize}
+
+\subsubsection{Compare performance with or without reusing infeasible solutions}
+We will run controlled experiments, tracking:
+\begin{itemize}
+\item Final solution quality
+\item Training stability
+\item Runtime efficiency
+\end{itemize}
+We want to see if reintroducing infeasible samples does indeed reduce the overall number of iterations needed or improves the final objective.
+
+\subsubsection{Write results and evaluation}
+Finally, we will summarize our findings in a short write-up to be integrated into the main paper. We will highlight any improvements in convergence speed or solution quality attributed to infeasible solution reuse.
+\subsection{Finish Up}
+\subsubsection{Finalizing the paper}
+The last two weeks of September will be devoted to finishing the final paper. We will:
+\begin{itemize}
+\item Merge the sections from previous phases.
+\item Create consistent tables and figures.
+\item Write conclusions and outline possible future work.
+\end{itemize}
+The final result should address our three research questions, offering a end to end KKT-based neural approach for LPs, a generalized version for MILPs, and an analysis of how infeasible solutions can guide the training process.
+\section{Risk Analysis}
+\label{sec:risk-analysis}
+In this section, we examine a range of potential risks associated with our proposal. Our approach carries certain risks that must be clearly identified and mitigated. Several challenges can arise in the course of integrating neural network approaches with optimization pipelines. These include concerns about computational overhead, convergence reliability, generalizability to new problem instances, data quality and diversity and much more. Additionally, bridging theoretical insights from convex optimization with practical neural-network training may introduces unforeseen complexities. Below, we detail ten key risks, each of which could affect the success of our methodology. We first discuss each risk qualitatively, noting how it might arise and why it can adversely impact our project.  Table~\ref{table:risk-analysis} summarizes these risks in three columns, indicating their gravity, a concise description, and a proposed mitigation strategy.
+\begin{table}[htbp]
+\centering
+\begin{tabular}{l | p{7cm} | p{6cm}}
+\hline
+\textbf{Gravity} & \textbf{Description} & \textbf{Mitigation} \\
+\hline
+\textbf{High} & 
+KKT-based losses for large-scale LP/MILPs can become memory-intensive and lead to slow training times. 
+& 
+Start with smaller benchmark instances (NETLIB/MIPLIB) and scale up gradually, employ hardware acceleration. \\
+
+\textbf{High} & 
+Introducing a custom loss function may invalidate standard hyperparameters, causing instability or slow convergence. 
+& 
+Perform hyperparameter tuning (e.g., Optuna), start with recommended GNN defaults and closely monitor training curves and loss decomposition to diagnose issues. \\
+
+\textbf{Medium} & 
+Relying on narrow benchmark repositories can lead to biased models that fail on diverse real-world distributions. 
+& 
+Use multiple repositories (NETLIB, MIPLIB, etc.) and, if needed, synthetic data generation (e.g., LLM-based). \\
+
+\textbf{Medium} & 
+Resource-heavy GNN architectures and iterative gradient-based training might exhaust CPU/GPU budgets, delaying progress. 
+& 
+Begin with small instances to estimate resource usage; scale up iteratively. If needed, focus on a representative subset of problem instances to reduce computational load. \\
+
+\textbf{Medium} & 
+Bugs or lack of support in libraries (e.g., SCIP, GNN repos) can stall progress or force last-minute migrations. 
+& 
+Containerize with Docker and pin library versions. \\
+
+\textbf{Medium} & 
+Multiple redesigns and experiments (e.g., architecture changes, debugging) can exceed planned schedules. 
+& 
+Use incremental milestones; maintain regular progress reviews, start with a minimal viable approach on small LPs, then extend to MILPs. \\
+
+\textbf{Low} & 
+Undocumented neural methods or hyperparameters can hinder independent verification of results. 
+& 
+Open-source all code and environment configurations document seeds, training protocols, and data pipelines \\
+
+\hline
+\end{tabular}
+\caption{Updated overview of key risks, their gravity, brief descriptions, and proposed mitigation strategies.}
+\label{table:risk-analysis}
+\end{table}
+
+
+\subsection{Complexity of the KKT-Based Loss for Large-Scale Problems.}
+Our KKT-based loss function - which encodes constraints, dual feasibility, and complementary slackness into a single differentiable objective - can become computationally expensive for large-scale LP or MILP instances. While each component of the loss is straightforward to compute for small systems (as in \cite{wu2023deep, fischetti2018deep}), scaling up to hundreds of thousands of variables or constraints may demand a lot of memory and long training times.
+\subsubsection{Mitigation}
+We will start with smaller, controlled instances from well-known benchmarks (NETLIB for LPs, MIPLIB for MILPs) and gradually scale up in problem size. We will use  hardware acceleration to handle large-scale settings.
+\subsection{Problems with predefined hyperparameters}
+Because we introduce a custom loss function, we should be aware that hyperparameters that would work for a predefined GNN-approach may not work anymore and may need finetuning.
+\subsubsection{Mitigation} We will start with the recommended hyperparameters and use cross-validation with a hyperparemeter-tuning framework such as Optuna to efficiently search the hyperparameter space. We will monitor training curves and loss decomposition to diagnose potential problems. 
+\subsection{Data Generation and Bias}
+A common pitfall is reliying a limited or biased set of benchmark problems. While standard repositories (NETLIB, MIPLIB) are invaluable, they may not reflect the diverse real-world distributions that an end-to-end solver could face.
+\subsubsection{Mitigation} We will use diverse sources of training and testing data, drawing from multiple benchmarks and repositories. If needed, we can adopt instance generation methods such as LLM-based scenario creation.  \cite{li2024towards}
+\subsection{Insufficient Computational Resources jeopardizing the timeline}
+Because we will rely on (possibly large) GNN architectures, iterative gradient-based training, and hyperparameter-finetuning. This approach could exhaust available CPU/GPU resources, especially with large problem instances. This in turn could jeopardize the project timeline.
+\subsubsection{Mitigation} We will start with small problem instances and scale iteratively to large instances. This allows us to estimate memory consumption and time complexity. Should resources become a bottleneck, we will prioritize a subset of representative instances rather than aim for exhaustive coverage. 
+\subsection{Dependency on Third-Party Libraries or Tools}
+Our research depends on external libraries such as SCIP, data loaders for NETLIB/MIPLIB, or a GNN-model from an existing GitHub repository. If there are problems with these libraries such as undiscovered bugs, or insufficient support, our project might be delayed or require an alternative solution.
+\subsubsection{Mitigation} We will containerize our environment with Docker or a similar technology, pinning specific library versions to ensure reproducibility. 
+\subsection{Uncertain Timeline Due to Iterative Development}
+Developing a new neural approach for optimization will involve multiple iterations of architecture design, hyperparameter tuning, debugging, and re-running experiments. This iterative nature can exceed initial time estimates. Each cycle might uncover new technical challenges or require design changes that propagate through our pipeline, again leading to pressure on the timeline.
+\subsubsection{Mitigation} We will consitently follow up on our planning (see Section \ref{section:Planning}). We will hold regular progress meetings, adjusting the scope if we find that certain tasks consistently slip. Starting with a minimal viable system that can already solve small LP. And moving to larger MILP instances and more advanced features such as the replay buffer for infeasible solutions.
+\subsection{Reproducibility}
+Neural methods can sometimes be opaque. If our code and data pipelines are not openly available, or if random seeds and hyperparameters are not documented, independent verification might fail.
+\subsubsection{Mitigation} We will release our source code in a public GitHub repository under an appropriate license, carefully documenting environment setups, dependencies, seeds, and training protocols.
+
+\newpage
+\appendix \label{Appendix}
+\section{Problem analysis}
+% Often, it is sufficient to explain the problem and the background of the problem in the introduction. In such cases, you do not need a separate section about the problem.
+
+% In other cases, you analyse the problem during your research preparation. You could, for instance, describe a simple example, and show how your example raises questions. In such cases, you could dedicate a separate section to this problem analysis.
+
+
+
+\subsection{Linear Programming and KKT}  \label{LP-KKT-sec}
+We define a linear program as follows:
+\begin{equation} \label{eq:LP_formulation}
+\min_{x} c^{\intercal} x \quad \text{s.t.} \quad A\,x \le b  
+\end{equation}
+where 
+\begin{equation}
+    \begin{split}
+        x &= (x_1,\dots,x_n)\\
+        c &= (c_1,\dots,c_n)\\
+        b &= (b_1,\dots,b_m)
+    \end{split}
+\end{equation}
+We introduce Lagrange multipliers $u = (u_1,\dots,u_m)$ with $u \ge 0$ and defined the Lagrangian as:
+\begin{equation}
+L(x,u) = c^{\intercal} x + u^{\intercal}\bigl(A\,x - b\bigr)   
+\end{equation}
+From a saddle-point or min--max perspective,
+\begin{equation}
+    \begin{split}
+\max_{u \ge 0} L(x,u) =
+\begin{cases}
+c^{\intercal} x, & \text{if } A\,x \le b,\\
++\infty, & \text{otherwise}
+\end{cases}        
+    \end{split}
+\end{equation}
+we noted that minimizing $c^{\intercal} x$ subject to $A\,x \le b$ is equivalent to
+\begin{equation}
+\min_{x}\max_{u \ge 0} L(x,u)
+\end{equation}
+where
+\begin{equation}
+    L(x,u) = c^{\intercal} x + u^{\intercal}\bigl(A\,x - b\bigr), \quad u \ge 0   
+\end{equation}
+The solution $(x^*,u^*)$ of the LP must therefore be a minimum in $x$ and a maximum in $u \ge 0$ for $L(x,u)$. 
+\begin{equation}
+    \begin{split}
+\min_{x}  L(x,u) &= \frac{\partial L}{\partial x} = 0 \\
+&= c^{\intercal} + u^{\intercal} A = 0 \\
+&= A^{\intercal}\,u + c = 0
+    \end{split}
+\end{equation}
+\begin{equation}
+    \begin{split}
+\max_{u \ge 0}  L(x,u) = \max_{u \ge 0} \bigl[u^{\intercal} (A x - b)\bigr] 
+    \end{split}
+\end{equation}
+since $x$ is treated as a constant when we vary $u$.  We then consider each component $(A x - b)_i$:
+\begin{itemize}
+\item If $(A x - b)_i < 0$, then with $u_i \ge 0$, the product $u_i\,(A x - b)_i$ is largest if $u_i = 0$. 
+\item If $(A x - b)_i = 0$, then $u_i \ge 0$ can be arbitrary, because $u_i\,0 = 0$. 
+\item If $(A x - b)_i > 0$, then letting $u_i \to \infty$ would make $u_i\,(A x - b)_i$ unbounded (i.e.\ the objective goes to $+\infty$).
+\end{itemize}
+Hence, for a finite optimum to exist, we must have
+\begin{equation}
+(A x - b)_i \le 0 \quad \text{for all } i,    
+\end{equation}
+and if $(A x - b)_i = 0$, then $u_i$ may be positive, whereas if $(A x - b)_i < 0$, we must take $u_i = 0$. Summarizing the conditions for a single (finite) solution in $x$ and $u$:
+\begin{equation}
+    \begin{split}
+A^{\intercal}\,u + c &= 0,\\
+u_i &=0 \iff ( A x - b)_i < 0,\\
+u_i &\ge 0 \iff ( A x - b)_i = 0
+    \end{split}
+\end{equation}
+Equivalently, we can write:
+\begin{equation}
+(A x - b)_i \le 0, 
+\qquad
+(A x - b)_i \, u_i = 0,
+\qquad
+u_i \ge 0,
+\quad \forall\,i
+\end{equation}
+Hence, solving the linear program from \ref{eq:LP_formulation} is equivalent to finding $x$ and $u \ge 0$ satisfying the KKT conditions \cite{KuhnTucker1951}:
+\begin{equation} \label{formula:KKT}
+\begin{cases}
+A^{\intercal}\,u + c = 0,\\
+A x - b \le 0,\\
+(A x - b)_i\,u_i = 0 \quad \forall\,i,\\
+u_i \ge 0 \quad \forall\,i.
+\end{cases}    
+\end{equation}
+\subsection{Eliminating Inequalities via ReLU}
+We now show how to remove the explicit inequalities by introducing the ``ReLU'' function:
+\begin{equation}
+\mathrm{ReLU}(z) = \max(0,z).
+\end{equation}
+We then see that:
+\begin{equation}
+    \mathrm{ReLU}(A x - b) = 0 \iff A x - b \le 0
+\end{equation}
+Applying this idea to the KKT conditions, recall that for each $i$ we need:
+\begin{equation}
+\begin{split}
+(A x - b)_i &\le 0, \\
+u_i &\ge 0, \\
+(A x - b)_i u_i &= 0    
+\end{split}
+\end{equation}
+The last equation, known as complementary slackness, says that either $(A x - b)_i = 0$ or $u_i = 0$.  A convenient way to encode these constraints simultaneously is:
+\begin{equation}
+\mathrm{ReLU}\bigl(u_i + (A x - b)_i\bigr) = u_i    
+\end{equation}
+When $(A x - b)_i \le 0$ and $u_i \ge 0$ with $(A x - b)_i\,u_i = 0$, one can check that this identity indeed holds. In effect, the ReLU-based formulation enforces nonnegativity, the inequality constraint, and complementary slackness all at once.
+
+Hence, the KKT system without explicit inequalities can be written as
+\begin{equation}
+\begin{cases}
+A^{\intercal}\,u = c,\\
+\mathrm{ReLU}\bigl(u + A x - b\bigr) = u.
+\end{cases}
+\end{equation}
+This removes the need to write out $A x - b \le 0$, $u \ge 0$, and $(A x - b)_j\,u_j = 0$ explicitly, since the ReLU formulation encodes them automatically.
+
+
+\subsection{Reformulation of Our LP and KKT conditions as minimizing a nonnegative Function}\label{proof:no_local_minima}
+
+We want to reformulate the linear program from \ref{eq:LP_formulation} and its KKT conditions from \ref{formula:KKT} as the minimization of a single, unconstrained nonnegative function. 
+\begin{equation}
+\begin{split}
+\Loss(x,u) &= \sum_{i=1}^n (A^{\intercal} u + c)_{i}^{2} + \sum_{j=1}^m \mathrm{ReLU}\bigl((Ax-b)_j\bigr) + \sum_{j=1}^m \mathrm{ReLU}(-u_j) + \sum_{j=1}^m u_j^{2}(Ax-b)_{j}^{2}\\
+&= \sum_{i=1}^n (c_i + \sum_{J=1}^m A_{ji} u_j)^{2} + \sum_{j=1}^m \mathrm{ReLU}(\sum_{i=1}^n A_{ij}x_j-b_j) + \sum_{j=1}^m \mathrm{ReLU}(-u_j) + \sum_{j=1}^m u_j^{2}(\sum_{i=1}^{n}A_{ij}x_i-b_j)^{2}\\
+\end{split}
+\end{equation}
+
+$\Loss(x,u)$ is  a sum of positive terms:
+\begin{equation}
+\Loss(x,u) = \sum_{k=1}^K f_k(x,u) \quad\text{with}  \quad f_k(x,u) \;\ge\; 0 \quad \forall(x,u)
+\end{equation}
+For a local minimum $(x_\ell,u_\ell)$, because $F$ is a sum, there must exist at least one term $k$ for which
+\begin{equation}
+f_k(x_\ell,u_\ell) > 0
+\end{equation}
+Otherwise, if all terms were zero, $\Loss(x_\ell,u_\ell)$ would be zero. Since each \(f_k\) is nonnegative and has \(0\) as its unique minimum, having \(f_k(x_\ell,u_\ell) > 0\) implies
+\begin{equation}
+\nabla f_k(x_\ell,u_\ell) \neq 0    
+\end{equation}
+In other words, the partial derivatives of $f_k$ at $(x_\ell,u_\ell)$ do not vanish. Hence the gradient of $F$ at $(x_\ell,u_\ell)$ is
+\begin{equation}
+\nabla \Loss(x_\ell,u_\ell) = \sum_{k=1}^K \nabla f_k(x_\ell,u_\ell) \neq 0,    
+\end{equation}
+since at least one $\nabla f_k$ is nonzero. This contradicts the necessary condition for a local minimum, which would require
+\begin{equation}
+    \nabla \Loss(x_\ell,u_\ell) = 0.
+\end{equation}
+Therefore, $F$ cannot have a local minimum at $(x_\ell,u_\ell)$ unless all terms $f_k(x_\ell,u_\ell)$ are zero. 
+\subsection{Using our loss-function for MILPs}\label{MILP:appendix}
+
+First, we solve the LP relaxation of the MILP to obtain a candidate solution $x^*_{LP}$.  
+Suppose its objective value is 
+\begin{equation}
+c^{\intercal} x^*_{LP} = O_{LP}    
+\end{equation}
+Then we know that the final MILP solution $x^*$ will satisfy 
+\begin{equation}
+c^{\intercal} x^* = O > O_{LP}    
+\end{equation}
+Next, we look for a feasible binary point $x$ close to $x^*_{LP}$ within the feasible region $Ax - b \le 0$, and we impose the bounds
+\[
+O_{LP} \le c^{\intercal} x \le O_{LP}\,\cdot \delta,
+\]
+where $\delta>1$. $O_{LP} = O_d$ the dual or lower bound, and $O_{LP}\cdot \delta = O_p$ the primary or upper bound.
+
+\begin{equation}
+\begin{split}
+&(1)\quad A x - b \le 0\\
+&(2)\quad O_d \le c^{\intercal} x \le O_p\\
+&(3)\quad x_i(1-x_i)=0, \quad \forall i.    
+\end{split}
+\end{equation}
+A loss function that penalizes violations of these constraints is
+\begin{equation}
+\Loss_{\text{MILP}}(x) = \sum_{j=1}^m \mathrm{ReLU}\bigl((A x - b)_j\bigr)
+  + \mathrm{ReLU}\bigl(-c^{\intercal} x + O_{d}\bigr)
+  + \mathrm{ReLU}\bigl(c^{\intercal} x - O_{p}\bigr)
+  + \sum_{i=1}^n x_i^2 \,\bigl(1 - x_i\bigr)^2
+\end{equation}
+The function $\Loss_{\text{MILP}}(x)$ again has no local minima, all terms are nonnegative and vanish only if $x$ satisfies the constraints exactly (making $\Loss_{\text{MILP}}(x)=0$). \\\\ 
+Now we use $\Loss_{\text{MILP}}(x)$ as the loss-function for a second neural network with $O_d = O_{LP}$ and $O_p = O_{LP} \cdot \delta$. 
+Suppose this yields a first feasible solution $x_1$
+We now have an update of the upper bound:
+\begin{equation}
+    O_p^1 = c^{\intercal} x_1
+\end{equation}
+We then use the NN a second time with $O_d = O_{LP}$ and $O_p = O_p^1$. This either
+returns $x_1$, then $x_1$ is optimal, or we get $x_2$ with
+\begin{equation}
+    c^{\intercal}x_2 = O_p^2 < O_p^1
+\end{equation}
+This is then repeated until x no longer changes or until
+\begin{equation}
+    \frac{x_{n-1} - x_n}{x_{n-1}} \le \epsilon
+\end{equation}
+\bibliographystyle{plainnat}
+\bibliography{report}
+
+
+\end{document}
