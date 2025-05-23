@@ -1,25 +1,13 @@
-# syntax=docker/dockerfile:1
+# Use Miniconda as base image
+FROM continuumio/miniconda3:4.12.0
 
-# Comments are provided throughout this file to help you get started.
-# If you need more help, visit the Dockerfile reference guide at
-# https://docs.docker.com/go/dockerfile-reference/
-
-# Want to help us make this template better? Share your feedback here: https://forms.gle/ybq9Krt8jtBL3iCk7
-
-ARG PYTHON_VERSION=3.8.13
-FROM python:${PYTHON_VERSION}-slim as base
-
-# Prevents Python from writing pyc files.
+# Prevents Python from writing pyc files and keeps Python from buffering stdout and stderr
 ENV PYTHONDONTWRITEBYTECODE=1
-
-# Keeps Python from buffering stdout and stderr to avoid situations where
-# the application crashes without emitting any logs due to buffering.
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Create a non-privileged user that the app will run under.
-# See https://docs.docker.com/go/dockerfile-user-best-practices/
+# Create a non-privileged user
 ARG UID=10001
 RUN adduser \
     --disabled-password \
@@ -30,22 +18,32 @@ RUN adduser \
     --uid "${UID}" \
     appuser
 
-# Download dependencies as a separate step to take advantage of Docker's caching.
-# Leverage a cache mount to /root/.cache/pip to speed up subsequent builds.
-# Leverage a bind mount to requirements.txt to avoid having to copy them into
-# into this layer.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,source=requirements.txt,target=requirements.txt \
-    python -m pip install -r requirements.txt
+# Install system dependencies required for PyTorch Geometric
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
 
-# Switch to the non-privileged user to run the application.
-USER appuser
+# Copy the requirements file
+COPY requirements.yml .
 
-# Copy the source code into the container.
+# Create conda environment from yml file
+RUN conda env create -f requirements.yml
+
+# Make RUN commands use the conda environment
+SHELL ["conda", "run", "-n", "graph-aug", "/bin/bash", "-c"]
+
+# Install pre-built PyTorch Geometric extensions to avoid compilation issues
+RUN conda run -n graph-aug pip install \
+    torch-scatter torch-sparse torch-cluster torch-spline-conv \
+    -f https://pytorch-geometric.com/whl/torch-1.7.1+cu102.html
+
+# Copy the source code
 COPY . .
 
-# Expose the port that the application listens on.
-EXPOSE 8000
+# Set up entry point to properly activate conda environment
+ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "graph-aug"]
 
-# Run the application.
-CMD run BASH
+# Run the application
+CMD ["bash"]
