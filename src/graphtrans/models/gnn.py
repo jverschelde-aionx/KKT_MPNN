@@ -8,7 +8,7 @@ from torch_geometric.nn import (
     global_mean_pool,
 )
 
-from modules.gnn_module import GNNNodeEmbedding
+from graphtrans.modules.gnn_module import GNNNodeEmbedding
 
 from .base_model import BaseModel
 
@@ -83,17 +83,23 @@ class GNN(BaseModel):
 
         if self.max_seq_len is None:
             if self.graph_pooling == "set2set":
-                self.graph_pred_linear = torch.nn.Linear(2 * self.emb_dim, self.num_tasks)
+                self.graph_pred_linear = torch.nn.Linear(
+                    2 * self.emb_dim, self.num_tasks
+                )
             else:
                 self.graph_pred_linear = torch.nn.Linear(self.emb_dim, self.num_tasks)
         else:
             self.graph_pred_linear_list = torch.nn.ModuleList()
             if self.graph_pooling == "set2set":
                 for i in range(self.max_seq_len):
-                    self.graph_pred_linear_list.append(torch.nn.Linear(2 * self.emb_dim, self.num_tasks))
+                    self.graph_pred_linear_list.append(
+                        torch.nn.Linear(2 * self.emb_dim, self.num_tasks)
+                    )
             else:
                 for i in range(self.max_seq_len):
-                    self.graph_pred_linear_list.append(torch.nn.Linear(self.emb_dim, self.num_tasks))
+                    self.graph_pred_linear_list.append(
+                        torch.nn.Linear(self.emb_dim, self.num_tasks)
+                    )
 
     def forward(self, batched_data, perturb=None):
         """

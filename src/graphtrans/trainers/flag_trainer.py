@@ -2,7 +2,7 @@ import torch
 import wandb
 from tqdm import tqdm
 
-from trainers import register_trainer
+from graphtrans.trainers import register_trainer
 
 from .base_trainer import BaseTrainer
 
@@ -29,7 +29,11 @@ class FlagTrainer(BaseTrainer):
             else:
                 optimizer.zero_grad()
 
-                perturb = torch.FloatTensor(batch.x.shape[0], args.gnn_emb_dim).uniform_(-args.step_size, args.step_size).to(device)
+                perturb = (
+                    torch.FloatTensor(batch.x.shape[0], args.gnn_emb_dim)
+                    .uniform_(-args.step_size, args.step_size)
+                    .to(device)
+                )
                 perturb.requires_grad_()
 
                 pred_list = model(batch, perturb)
@@ -38,7 +42,9 @@ class FlagTrainer(BaseTrainer):
 
                 for _ in range(args.m - 1):
                     loss.backward()
-                    perturb_data = perturb.detach() + args.step_size * torch.sign(perturb.grad.detach())
+                    perturb_data = perturb.detach() + args.step_size * torch.sign(
+                        perturb.grad.detach()
+                    )
                     perturb.data = perturb_data.data
                     perturb.grad[:] = 0
 

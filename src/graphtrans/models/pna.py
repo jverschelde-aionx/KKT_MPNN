@@ -12,7 +12,7 @@ from torch_geometric.nn import (
     global_mean_pool,
 )
 
-from modules.pna.pna_module import PNANodeEmbedding
+from graphtrans.modules.pna.pna_module import PNANodeEmbedding
 
 from .base_model import BaseModel
 

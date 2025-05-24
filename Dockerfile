@@ -18,26 +18,15 @@ RUN adduser \
     --uid "${UID}" \
     appuser
 
-# Install system dependencies required for PyTorch Geometric
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    git \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file
-COPY requirements.yml .
+# Copy the requirement file
+COPY environment.yml .
 
 # Create conda environment from yml file
-RUN conda env create -f requirements.yml
+RUN conda env create -f environment.yml
 
 # Make RUN commands use the conda environment
 SHELL ["conda", "run", "-n", "graph-aug", "/bin/bash", "-c"]
-
-# Install pre-built PyTorch Geometric extensions to avoid compilation issues
-RUN conda run -n graph-aug pip install \
-    torch-scatter torch-sparse torch-cluster torch-spline-conv \
-    -f https://pytorch-geometric.com/whl/torch-1.7.1+cu102.html
 
 # Copy the source code
 COPY . .

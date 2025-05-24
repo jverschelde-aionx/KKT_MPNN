@@ -10,9 +10,9 @@ from torch_geometric.nn import (
     global_mean_pool,
 )
 
-from modules.gnn_module import GNNNodeEmbedding
-from modules.transformer_encoder import TransformerNodeEncoder
-from modules.utils import pad_batch, unpad_batch
+from graphtrans.modules.gnn_module import GNNNodeEmbedding
+from graphtrans.modules.transformer_encoder import TransformerNodeEncoder
+from graphtrans.modules.utils import pad_batch, unpad_batch
 
 from .base_model import BaseModel
 
@@ -71,21 +71,34 @@ class Transformer(BaseModel):
 
         if self.max_seq_len is None:
             if self.graph_pooling == "set2set":
-                self.graph_pred_linear = torch.nn.Linear(2 * self.emb_dim, self.num_tasks)
+                self.graph_pred_linear = torch.nn.Linear(
+                    2 * self.emb_dim, self.num_tasks
+                )
             else:
                 self.graph_pred_linear = torch.nn.Linear(self.emb_dim, self.num_tasks)
         else:
             self.graph_pred_linear_list = torch.nn.ModuleList()
             if self.graph_pooling == "set2set":
                 for i in range(self.max_seq_len):
-                    self.graph_pred_linear_list.append(torch.nn.Linear(2 * self.emb_dim, self.num_tasks))
+                    self.graph_pred_linear_list.append(
+                        torch.nn.Linear(2 * self.emb_dim, self.num_tasks)
+                    )
             else:
                 for i in range(self.max_seq_len):
-                    self.graph_pred_linear_list.append(torch.nn.Linear(self.emb_dim, self.num_tasks))
+                    self.graph_pred_linear_list.append(
+                        torch.nn.Linear(self.emb_dim, self.num_tasks)
+                    )
 
     def forward(self, batched_data, perturb=None):
-        x, edge_index, edge_attr, batch = batched_data.x, batched_data.edge_index, batched_data.edge_attr, batched_data.batch
-        node_depth = batched_data.node_depth if hasattr(batched_data, "node_depth") else None
+        x, edge_index, edge_attr, batch = (
+            batched_data.x,
+            batched_data.edge_index,
+            batched_data.edge_attr,
+            batched_data.batch,
+        )
+        node_depth = (
+            batched_data.node_depth if hasattr(batched_data, "node_depth") else None
+        )
         encoded_node = (
             self.node_encoder(x)
             if node_depth is None
@@ -98,7 +111,9 @@ class Transformer(BaseModel):
         )
         tmp = encoded_node + perturb if perturb is not None else encoded_node
 
-        h_node, src_key_padding_mask, num_nodes, mask, max_num_nodes = pad_batch(tmp, batch, self.transformer.max_input_len, get_mask=True)
+        h_node, src_key_padding_mask, num_nodes, mask, max_num_nodes = pad_batch(
+            tmp, batch, self.transformer.max_input_len, get_mask=True
+        )
         h_node, src_key_padding_mask = self.transformer(h_node, src_key_padding_mask)
         if self.graph_pooling == "cls":
             h_graph = h_node[-1]

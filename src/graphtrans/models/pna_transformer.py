@@ -4,10 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger
 
-from modules.gnn_module import GNNNodeEmbedding
-from modules.pna.pna_module import PNANodeEmbedding
-from modules.transformer_encoder import TransformerNodeEncoder
-from modules.utils import pad_batch
+from graphtrans.modules.gnn_module import GNNNodeEmbedding
+from graphtrans.modules.pna.pna_module import PNANodeEmbedding
+from graphtrans.modules.transformer_encoder import TransformerNodeEncoder
+from graphtrans.modules.utils import pad_batch
 
 from .base_model import BaseModel
 
@@ -27,9 +27,19 @@ class PNATransformer(BaseModel):
         PNANodeEmbedding.add_args(parser)
 
         group = parser.add_argument_group("GNNTransformer - Training Config")
-        group.add_argument("--pretrained_gnn", type=str, default=None, help="pretrained gnn_node node embedding path")
+        group.add_argument(
+            "--pretrained_gnn",
+            type=str,
+            default=None,
+            help="pretrained gnn_node node embedding path",
+        )
         # group.add_argument('--drop_last_pretrained', action='store_true', default=False, help='drop the last layer for the pretrained model')
-        group.add_argument("--freeze_gnn", type=int, default=None, help="Freeze gnn_node weight from epoch `freeze_gnn`")
+        group.add_argument(
+            "--freeze_gnn",
+            type=int,
+            default=None,
+            help="Freeze gnn_node weight from epoch `freeze_gnn`",
+        )
 
     @staticmethod
     def name(args):
@@ -73,15 +83,21 @@ class PNATransformer(BaseModel):
             self.graph_pred_linear = torch.nn.Linear(output_dim, self.num_tasks)
         else:
             for i in range(args.max_seq_len):
-                self.graph_pred_linear_list.append(torch.nn.Linear(output_dim, self.num_tasks))
+                self.graph_pred_linear_list.append(
+                    torch.nn.Linear(output_dim, self.num_tasks)
+                )
 
     def forward(self, batched_data, perturb=None):
         h_node = self.gnn_node(batched_data, perturb)
         h_node = self.gnn2transformer(h_node)  # [s, b, d_model]
 
-        padded_h_node, src_padding_mask = pad_batch(h_node, batched_data.batch, self.transformer_encoder.max_input_len)  # Pad in the front
+        padded_h_node, src_padding_mask = pad_batch(
+            h_node, batched_data.batch, self.transformer_encoder.max_input_len
+        )  # Pad in the front
 
-        transformer_out, mask = self.transformer_encoder(padded_h_node, src_padding_mask)  # [s, b, h], [b, s]
+        transformer_out, mask = self.transformer_encoder(
+            padded_h_node, src_padding_mask
+        )  # [s, b, h], [b, s]
 
         if self.pooling in ["last", "cls"]:
             h_graph = transformer_out[-1]
