@@ -5,35 +5,21 @@ from datetime import datetime
 import configargparse
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-import wandb
 from loguru import logger
-from ogb.graphproppred import (
-    Evaluator,
-    PygGraphPropPredDataset,
-)
-from torch.optim.lr_scheduler import (
-    CosineAnnealingLR,
-    OneCycleLR,
-    ReduceLROnPlateau,
-)
-from torch_geometric.data import (
-    DataLoader,
-)
+from ogb.graphproppred import Evaluator, PygGraphPropPredDataset
+from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
+from torch_geometric.data import DataLoader
+from tqdm import tqdm
 
-from graphtrans import utils
-from graphtrans.data.adj_list import (
-    compute_adjacency_list_cached,
-)
-from graphtrans.dataset import (
-    DATASET_UTILS,
-)
-from graphtrans.models import (
-    get_model_and_parser,
-)
-from graphtrans.trainers import (
-    get_trainer_and_parser,
-)
+import graphtrans.utils as utils
+import wandb
+from graphtrans.data.adj_list import compute_adjacency_list_cached
+from graphtrans.dataset import DATASET_UTILS
+from graphtrans.models import get_model_and_parser
+from graphtrans.trainers import get_trainer_and_parser
 
 wandb.init(project="graph-aug")
 now = datetime.now()
@@ -49,7 +35,7 @@ def main():
 
 
     parser.add_argument('--data_root', type=str, default='/data/zhwu/ogb')
-    parser.add_argument('--dataset', type=str, default="ogbg-code",
+    parser.add_argument('--dataset', type=str, default="ogbg-code2",
                         help='dataset name (default: ogbg-code)')
 
     parser.add_argument('--aug', type=str, default='baseline',

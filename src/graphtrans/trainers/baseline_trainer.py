@@ -1,4 +1,4 @@
-from trainers import register_trainer
+from graphtrans.trainers import register_trainer
 
 from .base_trainer import BaseTrainer
 

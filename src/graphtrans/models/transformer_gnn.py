@@ -3,13 +3,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger
-
-from modules.gnn_module import GNNNodeEmbedding
-from modules.masked_transformer_encoder import MaskedOnlyTransformerEncoder
-from modules.transformer_encoder import TransformerNodeEncoder
-from modules.utils import pad_batch, unpad_batch
-
-from .base_model import BaseModel
 from torch_geometric.nn import (
     GlobalAttention,
     MessagePassing,
@@ -18,6 +11,14 @@ from torch_geometric.nn import (
     global_max_pool,
     global_mean_pool,
 )
+
+from graphtrans.modules.gnn_module import GNNNodeEmbedding
+from graphtrans.modules.masked_transformer_encoder import MaskedOnlyTransformerEncoder
+from graphtrans.modules.transformer_encoder import TransformerNodeEncoder
+from graphtrans.modules.utils import pad_batch, unpad_batch
+
+from .base_model import BaseModel
+
 
 class TransformerGNN(BaseModel):
     @staticmethod
@@ -29,8 +30,18 @@ class TransformerGNN(BaseModel):
         TransformerNodeEncoder.add_args(parser)
         MaskedOnlyTransformerEncoder.add_args(parser)
         group = parser.add_argument_group("GNNTransformer - Training Config")
-        group.add_argument("--pretrained_gnn", type=str, default=None, help="pretrained gnn_node node embedding path")
-        group.add_argument("--freeze_gnn", type=int, default=None, help="Freeze gnn_node weight from epoch `freeze_gnn`")
+        group.add_argument(
+            "--pretrained_gnn",
+            type=str,
+            default=None,
+            help="pretrained gnn_node node embedding path",
+        )
+        group.add_argument(
+            "--freeze_gnn",
+            type=int,
+            default=None,
+            help="Freeze gnn_node weight from epoch `freeze_gnn`",
+        )
         group.add_argument("--graph_input_dim", type=int, default=None)
 
     @staticmethod
@@ -54,7 +65,11 @@ class TransformerGNN(BaseModel):
     def __init__(self, num_tasks, node_encoder, edge_encoder_cls, args):
         super().__init__()
         self.node_encoder = node_encoder
-        self.input2transformer = nn.Linear(args.graph_input_dim, args.d_model) if args.graph_input_dim is not None else None
+        self.input2transformer = (
+            nn.Linear(args.graph_input_dim, args.d_model)
+            if args.graph_input_dim is not None
+            else None
+        )
         self.transformer_encoder = TransformerNodeEncoder(args)
         self.masked_transformer_encoder = MaskedOnlyTransformerEncoder(args)
         gnn_emb_dim = args.gnn_emb_dim
@@ -110,24 +125,34 @@ class TransformerGNN(BaseModel):
 
         if self.max_seq_len is None:
             if self.pooling == "set2set":
-                self.graph_pred_linear = torch.nn.Linear(2 * gnn_emb_dim, self.num_tasks)
+                self.graph_pred_linear = torch.nn.Linear(
+                    2 * gnn_emb_dim, self.num_tasks
+                )
             else:
                 self.graph_pred_linear = torch.nn.Linear(gnn_emb_dim, self.num_tasks)
         else:
             self.graph_pred_linear_list = torch.nn.ModuleList()
             if self.pooling == "set2set":
                 for i in range(self.max_seq_len):
-                    self.graph_pred_linear_list.append(torch.nn.Linear(2 * gnn_emb_dim, self.num_tasks))
+                    self.graph_pred_linear_list.append(
+                        torch.nn.Linear(2 * gnn_emb_dim, self.num_tasks)
+                    )
             else:
                 for i in range(self.max_seq_len):
-                    if args.gnn_JK == 'cat':
-                        self.graph_pred_linear_list.append(torch.nn.Linear(2 * gnn_emb_dim, self.num_tasks))
+                    if args.gnn_JK == "cat":
+                        self.graph_pred_linear_list.append(
+                            torch.nn.Linear(2 * gnn_emb_dim, self.num_tasks)
+                        )
                     else:
-                        self.graph_pred_linear_list.append(torch.nn.Linear(gnn_emb_dim, self.num_tasks))
+                        self.graph_pred_linear_list.append(
+                            torch.nn.Linear(gnn_emb_dim, self.num_tasks)
+                        )
 
     def forward(self, batched_data, perturb=None):
         x = batched_data.x
-        node_depth = batched_data.node_depth if hasattr(batched_data, "node_depth") else None
+        node_depth = (
+            batched_data.node_depth if hasattr(batched_data, "node_depth") else None
+        )
         encoded_node = (
             self.node_encoder(x)
             if node_depth is None
@@ -142,22 +167,31 @@ class TransformerGNN(BaseModel):
         if self.input2transformer is not None:
             tmp = self.input2transformer(tmp)
         padded_h_node, src_padding_mask, num_nodes, mask, max_num_nodes = pad_batch(
-            tmp, batched_data.batch, self.transformer_encoder.max_input_len, get_mask=True
+            tmp,
+            batched_data.batch,
+            self.transformer_encoder.max_input_len,
+            get_mask=True,
         )  # Pad in the front
         # TODO(paras): implement mask
         transformer_out = padded_h_node
         if self.num_encoder_layers_masked > 0:
             adj_list = batched_data.adj_list
-            padded_adj_list = torch.zeros((len(adj_list), max_num_nodes, max_num_nodes), device=h_node.device)
+            padded_adj_list = torch.zeros(
+                (len(adj_list), max_num_nodes, max_num_nodes), device=h_node.device
+            )
             for idx, adj_list_item in enumerate(adj_list):
                 N, _ = adj_list_item.shape
                 padded_adj_list[idx, 0:N, 0:N] = torch.from_numpy(adj_list_item)
             transformer_out = self.masked_transformer_encoder(
-                transformer_out.transpose(0, 1), attn_mask=padded_adj_list, valid_input_mask=src_padding_mask
+                transformer_out.transpose(0, 1),
+                attn_mask=padded_adj_list,
+                valid_input_mask=src_padding_mask,
             ).transpose(0, 1)
         if self.num_encoder_layers > 0:
-            transformer_out, _ = self.transformer_encoder(transformer_out, src_padding_mask)  # [s, b, h], [b, s]
-        
+            transformer_out, _ = self.transformer_encoder(
+                transformer_out, src_padding_mask
+            )  # [s, b, h], [b, s]
+
         h_node = unpad_batch(transformer_out, tmp, num_nodes, mask, max_num_nodes)
         batched_data.x = self.transformer2gnn(h_node)
         h_node = self.gnn_node(batched_data, None)

@@ -1,0 +1,87 @@
+name: graph-aug
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  # ---------------------------
+  # 1) Core Python + PyTorch
+  # ---------------------------
+  - python=3.9
+  - pytorch=2.0.*
+  - torchvision=0.15.*
+  - torchaudio=2.0.*
+  - pytorch-cuda=11.8
+  - numpy<2,>=1.21  # Ensure compatibility with PyTorch and other packages
+
+  # ---------------------------
+  # 2) Common Scientific Stack
+  # ---------------------------
+  - h5py
+  - scikit-learn
+  - scipy
+  - pandas
+  - matplotlib
+  - joblib
+  - networkx
+  - requests
+  - psutil
+  - tqdm
+  - llvmlite
+  - numba
+  - jinja2
+  - click
+  - configparser
+  - cycler
+  - decorator
+  - chardet
+  - idna
+  - isodate
+  - markupsafe
+  - python-dateutil
+  - pytz
+  - pyyaml
+  - pyparsing
+  - configargparse
+  - smmap          # needed by GitPython
+  - gitpython
+  # etc. (Any other packages that are in 'defaults' can be added here)
+
+  # ---------------------------
+  # 3) Basic conda utilities
+  # ---------------------------
+  - pip
+  - setuptools
+  - wheel
+
+  # ---------------------------
+  # 4) Pip-only packages
+  # ---------------------------
+  - pip:
+      # PyG wheels for PyTorch 2.0 + cu118
+      - -f https://data.pyg.org/whl/torch-2.0.0+cu118.html
+      - torch-scatter
+      - torch-sparse
+      - torch-cluster
+      - torch-spline-conv
+      - torch-geometric
+
+      # Packages not easily found or up-to-date in 'defaults'
+      - docker-pycreds
+      - googledrivedownloader
+      - littleutils
+      - ogb               # typically in conda-forge, but keep in pip if not using conda-forge
+      - outdated
+      - pathtools
+      - promise
+      - python-louvain
+      - sentry-sdk
+      - shortuuid
+      - subprocess32
+      - wandb
+      - rdflib
+
+      # If you prefer, you can unpin or relax these versions further:
+      # e.g., "ase", "loguru" in conda-forge, but we keep them in pip or move them above if found in defaults:
+      - ase
+      - loguru

@@ -1,14 +1,15 @@
+import math
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger
 
-import math
-from modules.gnn_module import GNNNodeEmbedding
-from modules.masked_transformer_encoder import MaskedOnlyTransformerEncoder
-from modules.transformer_encoder import TransformerNodeEncoder
-from modules.utils import pad_batch
+from graphtrans.modules.gnn_module import GNNNodeEmbedding
+from graphtrans.modules.masked_transformer_encoder import MaskedOnlyTransformerEncoder
+from graphtrans.modules.transformer_encoder import TransformerNodeEncoder
+from graphtrans.modules.utils import pad_batch
 
 from .base_model import BaseModel
 
@@ -23,9 +24,19 @@ class GNNTransformer(BaseModel):
         TransformerNodeEncoder.add_args(parser)
         MaskedOnlyTransformerEncoder.add_args(parser)
         group = parser.add_argument_group("GNNTransformer - Training Config")
-        group.add_argument("--pos_encoder", default=False, action='store_true')
-        group.add_argument("--pretrained_gnn", type=str, default=None, help="pretrained gnn_node node embedding path")
-        group.add_argument("--freeze_gnn", type=int, default=None, help="Freeze gnn_node weight from epoch `freeze_gnn`")
+        group.add_argument("--pos_encoder", default=False, action="store_true")
+        group.add_argument(
+            "--pretrained_gnn",
+            type=str,
+            default=None,
+            help="pretrained gnn_node node embedding path",
+        )
+        group.add_argument(
+            "--freeze_gnn",
+            type=int,
+            default=None,
+            help="Freeze gnn_node weight from epoch `freeze_gnn`",
+        )
 
     @staticmethod
     def name(args):
@@ -68,7 +79,9 @@ class GNNTransformer(BaseModel):
 
         gnn_emb_dim = 2 * args.gnn_emb_dim if args.gnn_JK == "cat" else args.gnn_emb_dim
         self.gnn2transformer = nn.Linear(gnn_emb_dim, args.d_model)
-        self.pos_encoder = PositionalEncoding(args.d_model, dropout=0) if args.pos_encoder else None
+        self.pos_encoder = (
+            PositionalEncoding(args.d_model, dropout=0) if args.pos_encoder else None
+        )
         self.transformer_encoder = TransformerNodeEncoder(args)
         self.masked_transformer_encoder = MaskedOnlyTransformerEncoder(args)
         self.num_encoder_layers = args.num_encoder_layers
@@ -85,14 +98,19 @@ class GNNTransformer(BaseModel):
             self.graph_pred_linear = torch.nn.Linear(output_dim, self.num_tasks)
         else:
             for i in range(args.max_seq_len):
-                self.graph_pred_linear_list.append(torch.nn.Linear(output_dim, self.num_tasks))
+                self.graph_pred_linear_list.append(
+                    torch.nn.Linear(output_dim, self.num_tasks)
+                )
 
     def forward(self, batched_data, perturb=None):
         h_node = self.gnn_node(batched_data, perturb)
         h_node = self.gnn2transformer(h_node)  # [s, b, d_model]
 
         padded_h_node, src_padding_mask, num_nodes, mask, max_num_nodes = pad_batch(
-            h_node, batched_data.batch, self.transformer_encoder.max_input_len, get_mask=True
+            h_node,
+            batched_data.batch,
+            self.transformer_encoder.max_input_len,
+            get_mask=True,
         )  # Pad in the front
 
         # TODO(paras): implement mask
@@ -101,15 +119,21 @@ class GNNTransformer(BaseModel):
             transformer_out = self.pos_encoder(transformer_out)
         if self.num_encoder_layers_masked > 0:
             adj_list = batched_data.adj_list
-            padded_adj_list = torch.zeros((len(adj_list), max_num_nodes, max_num_nodes), device=h_node.device)
+            padded_adj_list = torch.zeros(
+                (len(adj_list), max_num_nodes, max_num_nodes), device=h_node.device
+            )
             for idx, adj_list_item in enumerate(adj_list):
                 N, _ = adj_list_item.shape
                 padded_adj_list[idx, 0:N, 0:N] = torch.from_numpy(adj_list_item)
             transformer_out = self.masked_transformer_encoder(
-                transformer_out.transpose(0, 1), attn_mask=padded_adj_list, valid_input_mask=src_padding_mask
+                transformer_out.transpose(0, 1),
+                attn_mask=padded_adj_list,
+                valid_input_mask=src_padding_mask,
             ).transpose(0, 1)
         if self.num_encoder_layers > 0:
-            transformer_out, _ = self.transformer_encoder(transformer_out, src_padding_mask)  # [s, b, h], [b, s]
+            transformer_out, _ = self.transformer_encoder(
+                transformer_out, src_padding_mask
+            )  # [s, b, h], [b, s]
 
         if self.pooling in ["last", "cls"]:
             h_graph = transformer_out[-1]
@@ -147,22 +171,23 @@ class GNNTransformer(BaseModel):
 
 
 class PositionalEncoding(nn.Module):
-
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
         position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+        )
         pe = torch.zeros(max_len, 1, d_model)
         pe[:, 0, 0::2] = torch.sin(position * div_term)
         pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        self.register_buffer("pe", pe)
 
     def forward(self, x):
         """
         Args:
             x: Tensor, shape [seq_len, batch_size, embedding_dim]
         """
-        x = x + self.pe[:x.size(0)]
+        x = x + self.pe[: x.size(0)]
         return self.dropout(x)
