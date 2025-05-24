@@ -5,18 +5,9 @@ from datetime import datetime
 import configargparse
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-import utils
 import wandb
-from dataset import (
-    DATASET_UTILS,
-)
 from loguru import logger
-from models import (
-    get_model_and_parser,
-)
 from ogb.graphproppred import (
     Evaluator,
     PygGraphPropPredDataset,
@@ -29,13 +20,19 @@ from torch.optim.lr_scheduler import (
 from torch_geometric.data import (
     DataLoader,
 )
-from tqdm import tqdm
-from trainers import (
-    get_trainer_and_parser,
-)
 
-from data.adj_list import (
+from graphtrans import utils
+from graphtrans.data.adj_list import (
     compute_adjacency_list_cached,
+)
+from graphtrans.dataset import (
+    DATASET_UTILS,
+)
+from graphtrans.models import (
+    get_model_and_parser,
+)
+from graphtrans.trainers import (
+    get_trainer_and_parser,
 )
 
 wandb.init(project="graph-aug")
