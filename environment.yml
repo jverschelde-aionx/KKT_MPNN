@@ -80,8 +80,7 @@ dependencies:
       - subprocess32
       - wandb
       - rdflib
-
-      # If you prefer, you can unpin or relax these versions further:
-      # e.g., "ase", "loguru" in conda-forge, but we keep them in pip or move them above if found in defaults:
+      - gurobipy
+      - pyscipopt
       - ase
       - loguru

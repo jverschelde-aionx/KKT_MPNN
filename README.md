@@ -43,3 +43,8 @@ implementation in PyTorch4 (Kostrikov, 2018), modified to be tailored for MILP p
 - https://github.com/yandex-research/rtdl-num-embeddings
 - https://github.com/ucbrise/graphtrans
 - https://github.com/sribdcn/Predict-and-Search_MILP_method
+
+##
+Test scalability (problems scale in size)
+Differt problem types (different types)
+compare with traditional solvers in runtime
