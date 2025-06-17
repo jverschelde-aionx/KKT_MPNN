@@ -2,6 +2,7 @@ name: graph-aug
 channels:
   - pytorch
   - nvidia
+  - conda-forge
   - defaults
 dependencies:
   # ---------------------------
@@ -41,6 +42,7 @@ dependencies:
   - python-dateutil
   - pytz
   - pyyaml
+  - ecole
   - pyparsing
   - configargparse
   - smmap          # needed by GitPython
@@ -73,6 +75,7 @@ dependencies:
       - ogb               # typically in conda-forge, but keep in pip if not using conda-forge
       - outdated
       - pathtools
+      - ortools
       - promise
       - python-louvain
       - sentry-sdk

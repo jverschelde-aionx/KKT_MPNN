@@ -48,3 +48,7 @@ implementation in PyTorch4 (Kostrikov, 2018), modified to be tailored for MILP p
 Test scalability (problems scale in size)
 Differt problem types (different types)
 compare with traditional solvers in runtime
+
+
+# IP And WA problem instances
+https://drive.google.com/file/d/1MytdY3IwX_aFRWdoc0mMfDN9Xg1EKUuq/view
