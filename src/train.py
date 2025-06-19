@@ -85,7 +85,7 @@ def main():
         valid_data, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS
     )
 
-    node_encoder = GNNPolicy()
+    node_encoder = GNNPolicy(args)
 
     model = GNNTransformer(
         num_tasks=num_tasks,

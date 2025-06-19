@@ -3,3 +3,4 @@ wandb/
 # Datasets
 src/MPNN/dataset/*
 .venv/
+exps/
