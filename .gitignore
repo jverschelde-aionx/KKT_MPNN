@@ -5,3 +5,4 @@ wandb/
 src/MPNN/instance/train/*
 src/MPNN/instance/test/*
 src/MPNN/dataset/
+exps/
