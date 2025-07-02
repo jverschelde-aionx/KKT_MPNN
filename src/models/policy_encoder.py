@@ -302,3 +302,70 @@ class BipartiteNodeData(torch_geometric.data.Data):
             return self.variable_features.size(0)
         else:
             return super().__inc__(key, value, *args, **kwargs)
+
+
+# custom class that wraps the GNNPolicy to be used as an encoder that can be used in a GraphTrans model.
+class PolicyEncoder(torch.nn.Module):
+    """
+    Wrapper that turns GNNPolicy into a pure encoder.
+    `out_dim` is used later by the transformer.
+    """
+
+    def __init__(self, args):
+        super().__init__()
+        self.base = GNNPolicy(args)
+        self.out_dim = args.embedding_size  # 64 by default
+
+    def forward(self, data, perturb=None):
+        c = data.constraint_features  # [n_c, f_c]
+        v = data.variable_features  # [n_v, f_v]
+        e_idx = data.edge_index  # shape [2, |E|]
+        e_attr = data.edge_attr  # [|E|, f_e]
+
+        # identical to first part of original GNNPolicy.forward
+        rev_idx = torch.stack([e_idx[1], e_idx[0]], dim=0)
+        c = self.base.cons_embedding(c)
+        e = self.base.edge_embedding(e_attr)
+        v = self.base.var_embedding(v)
+
+        c = self.base.conv_v_to_c(v, rev_idx, e, c)
+        v = self.base.conv_c_to_v(c, e_idx, e, v)
+        c = self.base.conv_v_to_c2(v, rev_idx, e, c)
+        v = self.base.conv_c_to_v2(c, e_idx, e, v)
+
+        h = torch.cat([c, v], dim=0)  # [n_c+n_v, 64]
+        if perturb is not None:
+            h = h + perturb
+        return h
+
+
+# This collate function is used to create batches of BipartiteNodeData objects.
+def collate(batch):
+    """
+    A hand‑written collate_fn that turns a list of
+    BipartiteNodeData objects into one batch *and*
+    returns A, b, c with fixed sizes (m, n).
+    """
+    graphs, A_list, b_list, c_list = [], [], [], []
+
+    for data in batch:
+        graphs.append(data)  # still a pyg Data object
+
+        # Suppose `data.edge_index` holds (row, col) of A
+        #         `data.edge_attr`  holds the coefficient value
+        m, n = data.varInds[1][0].size(0), data.ntvars
+        A = torch.zeros(m, n, device=data.edge_index.device)
+
+        rows, cols = data.edge_index
+        A[rows, cols - m] = data.edge_attr.squeeze(-1)  # convert to dense
+        A_list.append(A)
+
+        b_list.append(data.constraint_features[:, 0])  # adapt to your layout
+        c_list.append(data.variable_features[:, 0])  # adapt to your layout
+
+    batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
+    A_batch = torch.stack(A_list)  # (B, m, n)
+    b_batch = torch.stack(b_list)  # (B, m)
+    c_batch = torch.stack(c_list)  # (B, n)
+
+    return batch_graph, A_batch, b_batch, c_batch

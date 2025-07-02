@@ -1,9 +1,8 @@
 import math
+from typing import Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from loguru import logger
 
 from graphtrans.modules.gnn_module import GNNNodeEmbedding
@@ -11,7 +10,28 @@ from graphtrans.modules.masked_transformer_encoder import MaskedOnlyTransformerE
 from graphtrans.modules.transformer_encoder import TransformerNodeEncoder
 from graphtrans.modules.utils import pad_batch
 
-from .base_model import BaseModel
+
+class BaseModel(nn.Module):
+    @staticmethod
+    def need_deg():
+        return False
+
+    @staticmethod
+    def add_args(parser):
+        return
+
+    @staticmethod
+    def name(args):
+        raise NotImplementedError
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, batched_data, perturb=None):
+        raise NotImplementedError
+
+    def epoch_callback(self, epoch):
+        return
 
 
 class GNNTransformer(BaseModel):
@@ -56,19 +76,15 @@ class GNNTransformer(BaseModel):
         name += "-prenorm" if args.transformer_prenorm else "-postnorm"
         return name
 
-    def __init__(self, num_tasks, node_encoder, edge_encoder_cls, args):
+    def __init__(
+        self,
+        num_tasks,
+        args,
+        gnn_node: Optional[nn.Module] = None,
+    ):
         super().__init__()
-        self.gnn_node = GNNNodeEmbedding(
-            args.gnn_virtual_node,
-            args.gnn_num_layer,
-            args.gnn_emb_dim,
-            node_encoder,
-            edge_encoder_cls,
-            JK=args.gnn_JK,
-            drop_ratio=args.gnn_dropout,
-            residual=args.gnn_residual,
-            gnn_type=args.gnn_type,
-        )
+        self.gnn_node = gnn_node
+
         if args.pretrained_gnn:
             # logger.info(self.gnn_node)
             state_dict = torch.load(args.pretrained_gnn)
@@ -77,7 +93,7 @@ class GNNTransformer(BaseModel):
             self.gnn_node.load_state_dict(state_dict)
         self.freeze_gnn = args.freeze_gnn
 
-        gnn_emb_dim = 2 * args.gnn_emb_dim if args.gnn_JK == "cat" else args.gnn_emb_dim
+        gnn_emb_dim = gnn_node.out_dim
         self.gnn2transformer = nn.Linear(gnn_emb_dim, args.d_model)
         self.pos_encoder = (
             PositionalEncoding(args.d_model, dropout=0) if args.pos_encoder else None
@@ -168,6 +184,9 @@ class GNNTransformer(BaseModel):
                 new_key = ".".join(new_key[module_index + 1 :])
                 new_state_dict[new_key] = v
         return new_state_dict
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 class PositionalEncoding(nn.Module):
