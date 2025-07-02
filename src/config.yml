@@ -1,4 +1,4 @@
-dataset: ecole-IS
+dataset: IS
 aug: baseline
 model_type: gnn-transformer
 

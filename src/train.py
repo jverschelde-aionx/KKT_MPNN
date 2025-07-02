@@ -1,11 +1,16 @@
+import os
 from datetime import datetime
 
 import configargparse
+import torch
+from loguru import logger
 from torch_geometric.loader import DataLoader
 
-from models.GCN import GNNPolicy, GraphDataset
+import wandb
 from models.gnn_transformer import GNNTransformer
+from models.policy_encoder import GraphDataset, PolicyEncoder, collate
 
+wandb.init(project="kkt_transformer")
 now = datetime.now()
 now = now.strftime("%m_%d-%H_%M_%S")
 
@@ -54,14 +59,23 @@ def main():
     # group = parser.add_argument_group('training')
     # group.add_argument('--devices', type=str, default="0",
     #                     help='which gpu to use if any (default: 0)')
-    # group.add_argument('--batch_size', type=int, default=128,
-    #                     help='input batch size for training (default: 128)')
-    # group.add_argument('--eval_batch_size', type=int, default=None,
-    #                     help='input batch size for training (default: train batch size)')
+    group.add_argument(
+        "--batch_size",
+        type=int,
+        default=128,
+        help="input batch size for training (default: 128)",
+    )
+    group.add_argument(
+        "--eval_batch_size",
+        type=int,
+        default=None,
+        help="input batch size for training (default: train batch size)",
+    )
     # group.add_argument('--epochs', type=int, default=30,
     #                     help='number of epochs to train (default: 30)')
-    # group.add_argument('--num_workers', type=int, default=0,
-    #                     help='number of workers (default: 0)')
+    group.add_argument(
+        "--num_workers", type=int, default=0, help="number of workers (default: 0)"
+    )
     # group.add_argument('--scheduler', type=str, default=None)
     # group.add_argument('--pct_start', type=float, default=0.3)
     # group.add_argument('--weight_decay', type=float, default=0.0)
@@ -74,25 +88,54 @@ def main():
     # group.add_argument('--resume', type=str, default=None)
     # group.add_argument('--seed', type=int, default=None)
 
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="IS",
+        help="dataset to use",
+    )
+
     args, _ = parser.parse_known_args()
+
+    DIR_BG = f"../data/dataset/{args.dataset}/BG"
+
+    train_files = os.listdir(f"{DIR_BG}/train")
+    valid_files = os.listdir(f"{DIR_BG}/valid")
 
     train_data = GraphDataset(train_files)
     train_loader = DataLoader(
-        train_data, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS
+        train_data,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        collate_fn=collate,
     )
+
     valid_data = GraphDataset(valid_files)
     valid_loader = DataLoader(
-        valid_data, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS
+        valid_data,
+        batch_size=args.eval_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate,
     )
 
-    node_encoder = GNNPolicy(args)
+    device = (
+        torch.device("cuda")
+        if torch.cuda.is_available() and args.devices
+        else torch.device("cpu")
+    )
+    node_encoder = PolicyEncoder(args)
 
     model = GNNTransformer(
-        num_tasks=num_tasks,
+        num_tasks=train_data.len(),
         args=args,
-        node_encoder=node_encoder,
-        edge_encoder_cls=edge_encoder_cls,
+        gnn_node=node_encoder,
     ).to(device)
+
+    print("Model Parameters: ", model.count_parameters())
+
+    wandb.watch(model)
 
 
 if __name__ == "__main__":
