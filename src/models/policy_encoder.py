@@ -205,19 +205,23 @@ class GraphDataset(torch_geometric.data.Dataset):
         return len(self.sample_files)
 
     def process_sample(self, filepath):
-        BGFilepath, solFilePath = filepath
+        # Handle single BG file path (no solution file needed for KKT training)
+        BGFilepath = filepath
         with open(BGFilepath, "rb") as f:
             bgData = pickle.load(f)
-        with open(solFilePath, "rb") as f:
-            solData = pickle.load(f)
 
         BG = bgData
-        varNames = solData["var_names"]
+        A, v_map, v_nodes, c_nodes, b_vars = BG
 
-        sols = solData["sols"][:50]  # [0:300]
-        objs = solData["objs"][:50]  # [0:300]
+        # Create dummy solution data since KKT training doesn't need ground truth
+        # Extract variable names from the BG data structure
+        varNames = v_map if isinstance(v_map, list) else list(range(len(v_nodes)))
 
-        sols = np.round(sols, 0)
+        # Create dummy solutions and objectives (will be ignored in KKT training)
+        n_vars = len(v_nodes)
+        sols = np.zeros((1, n_vars))  # Single dummy solution
+        objs = np.array([0.0])  # Single dummy objective
+
         return BG, sols, objs, varNames
 
     def get(self, index):
