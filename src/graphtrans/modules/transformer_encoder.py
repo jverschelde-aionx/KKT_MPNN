@@ -3,8 +3,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import graphtrans.models.gnn as gnn
-
 
 class TransformerNodeEncoder(nn.Module):
     @staticmethod

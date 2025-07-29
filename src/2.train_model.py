@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+import types
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Tuple
@@ -11,11 +12,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import yaml
 from loguru import logger
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 
 import wandb
+from instances.common import COMBINATORIAL_AUCTION, INDEPENDANT_SET
 from models.gnn_transformer import GNNTransformer
 from models.losses import AdaptiveKKTLoss, KKTLoss
 from models.policy_encoder import GraphDataset, PolicyEncoder, collate
@@ -102,24 +105,22 @@ def eval_epoch(
     return total_loss / n_batches, avg_metrics
 
 
-def main():
+def train():
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
-        description="[KKT] GNN‑Transformer",
+        description="[KKT] Train GNN-Transformer",
     )
 
-    parser.add_argument("--configs", is_config_file=True, required=False)
-
     # Model
-    g = parser.add_argument_group("model")
-    g.add_argument("--graph_pooling", type=str, default="mean")
-    g.add_argument("--gnn_type", type=str, default="gcn")
-    g.add_argument("--gnn_virtual_node", action="store_true")
-    g.add_argument("--gnn_dropout", type=float, default=0.0)
-    g.add_argument("--gnn_num_layer", type=int, default=5)
-    g.add_argument("--gnn_emb_dim", type=int, default=300)
-    g.add_argument("--gnn_JK", type=str, default="last")
-    g.add_argument("--gnn_residual", action="store_true")
+    m = parser.add_argument_group("model")
+    m.add_argument("--graph_pooling", type=str, default="mean")
+    m.add_argument("--gnn_type", type=str, default="gcn")
+    m.add_argument("--gnn_virtual_node", action="store_true")
+    m.add_argument("--gnn_dropout", type=float, default=0.0)
+    m.add_argument("--gnn_num_layer", type=int, default=5)
+    m.add_argument("--gnn_emb_dim", type=int, default=300)
+    m.add_argument("--gnn_JK", type=str, default="last")
+    m.add_argument("--gnn_residual", action="store_true")
 
     # Training
     t = parser.add_argument_group("training")
@@ -137,18 +138,62 @@ def main():
     t.add_argument("--pct_start", type=float, default=0.3)  # OneCycle
     t.add_argument("--grad_clip", type=float, default=1.0)
     t.add_argument("--seed", type=int, default=0)
+    t.add_argument("--kkt_w_primal", type=float, default=0.1)
+    t.add_argument("--kkt_w_dual", type=float, default=0.1)
+    t.add_argument("--kkt_w_station", type=float, default=0.6)
+    t.add_argument("--kkt_w_comp", type=float, default=0.2)
 
     # Data
-    parser.add_argument("--dataset", type=str, default="IS")
-    parser.add_argument("--data_dir", type=str, default="../data/dataset")
+    d = parser.add_argument_group("data")
+    d.add_argument(
+        "--problems",
+        type=str,
+        nargs="+",
+        default=[INDEPENDANT_SET, COMBINATORIAL_AUCTION],
+        help="Problem type",
+    )
+    d.add_argument(
+        "--is_sizes",
+        type=int,
+        nargs="+",
+        default=[10, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 50000],
+    )
+    d.add_argument(
+        "--ca_sizes",
+        type=int,
+        nargs="+",
+        default=[10, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 50000],
+    )
+    d.add_argument(
+        "--n_instances", type=int, default=1000, help="Number of instances per size"
+    )
+    d.add_argument(
+        "--test_split",
+        type=float,
+        default=0.15,
+        help="Fraction of instances for the test set",
+    )
+    d.add_argument(
+        "--val_split",
+        type=float,
+        default=0.15,
+        help="Fraction of instances for the validation set",
+    )
+    d.add_argument("--data_root", type=str, default="../data")
+    d.add_argument(
+        "--solve", action="store_true", help="Run Gurobi to collect solution pools"
+    )
+    d.add_argument(
+        "--gurobi_threads", type=int, default=4, help="Number of threads for Gurobi"
+    )
+    d.add_argument(
+        "--n_jobs",
+        type=int,
+        default=32,
+        help="Number of parallel jobs for data generation",
+    )
 
-    # Loss
-    parser.add_argument("--kkt_w_primal", type=float, default=0.1)
-    parser.add_argument("--kkt_w_dual", type=float, default=0.1)
-    parser.add_argument("--kkt_w_station", type=float, default=0.6)
-    parser.add_argument("--kkt_w_comp", type=float, default=0.2)
-
-    args = parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
     # Ensure reproducibility
     if args.seed is not None:
@@ -165,7 +210,7 @@ def main():
 
     # Initialize wandb
     run_name = (
-        f"{args.dataset}"
+        f"{'-'.join(args.problems)}"
         f"+GNNT={args.gnn_type}"
         f"+emb={args.gnn_emb_dim}"
         f"+lr={args.lr}"
@@ -175,9 +220,17 @@ def main():
     wandb.init(project="kkt_transformer", name=run_name, config=vars(args))
 
     # Setup data
-    dir_bg = Path(args.data_dir) / args.dataset / "BG"
-    train_files = sorted((dir_bg / "train").iterdir())
-    valid_files = sorted((dir_bg / "valid").iterdir())
+    train_files, valid_files = [], []
+
+    for problem in args.problems:
+        dir_bg = Path(args.data_root) / problem / "BG"
+        for dir in (dir_bg / "train").iterdir():
+            train_files.extend(os.listdir(dir))
+        for dir in (dir_bg / "val").iterdir():
+            valid_files.extend(os.listdir(dir))
+
+    train_files = sorted(train_files)
+    valid_files = sorted(valid_files)
 
     train_data = GraphDataset(train_files)
     valid_data = GraphDataset(valid_files)
@@ -311,4 +364,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    train()
