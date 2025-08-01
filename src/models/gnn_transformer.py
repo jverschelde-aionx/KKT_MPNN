@@ -1,5 +1,5 @@
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -77,13 +77,13 @@ class GNNTransformer(BaseModel):
 
     def __init__(
         self,
-        num_tasks,
         args,
         gnn_node: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.gnn_node = gnn_node
 
+        # load or freeze GNN weights
         if args.pretrained_gnn:
             # logger.info(self.gnn_node)
             state_dict = torch.load(args.pretrained_gnn)
@@ -92,32 +92,23 @@ class GNNTransformer(BaseModel):
             self.gnn_node.load_state_dict(state_dict)
         self.freeze_gnn = args.freeze_gnn
 
+        # projection from GNN dim to transformer dim
         gnn_emb_dim = gnn_node.out_dim
         self.gnn2transformer = nn.Linear(gnn_emb_dim, args.d_model)
         self.pos_encoder = (
             PositionalEncoding(args.d_model, dropout=0) if args.pos_encoder else None
         )
+        # transformer encoders
         self.transformer_encoder = TransformerNodeEncoder(args)
         self.masked_transformer_encoder = MaskedOnlyTransformerEncoder(args)
         self.num_encoder_layers = args.num_encoder_layers
         self.num_encoder_layers_masked = args.num_encoder_layers_masked
 
-        self.num_tasks = num_tasks
-        self.pooling = args.graph_pooling
-        self.graph_pred_linear_list = torch.nn.ModuleList()
-
+        self.head = VarConstHead(args.d_model)
         self.max_seq_len = args.max_seq_len
-        output_dim = args.d_model
 
-        if args.max_seq_len is None:
-            self.graph_pred_linear = torch.nn.Linear(output_dim, self.num_tasks)
-        else:
-            for i in range(args.max_seq_len):
-                self.graph_pred_linear_list.append(
-                    torch.nn.Linear(output_dim, self.num_tasks)
-                )
-
-    def forward(self, batched_data, perturb=None):
+    def forward(self, batched_data, perturb=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        # GNN encoding
         h_node = self.gnn_node(batched_data, perturb)
         h_node = self.gnn2transformer(h_node)  # [s, b, d_model]
 
@@ -128,10 +119,10 @@ class GNNTransformer(BaseModel):
             get_mask=True,
         )  # Pad in the front
 
-        # TODO(paras): implement mask
         transformer_out = padded_h_node
         if self.pos_encoder is not None:
             transformer_out = self.pos_encoder(transformer_out)
+        # masked-only encoder
         if self.num_encoder_layers_masked > 0:
             adj_list = batched_data.adj_list
             padded_adj_list = torch.zeros(
@@ -145,26 +136,24 @@ class GNNTransformer(BaseModel):
                 attn_mask=padded_adj_list,
                 valid_input_mask=src_padding_mask,
             ).transpose(0, 1)
+        # vanilla encoder layers
         if self.num_encoder_layers > 0:
             transformer_out, _ = self.transformer_encoder(
                 transformer_out, src_padding_mask
             )  # [s, b, h], [b, s]
 
-        if self.pooling in ["last", "cls"]:
-            h_graph = transformer_out[-1]
-        elif self.pooling == "mean":
-            h_graph = transformer_out.sum(0) / src_padding_mask.sum(-1, keepdim=True)
-        else:
-            raise NotImplementedError
+        # remove padding & flatten to (N_tot, d)
+        # transformer_out: S, B, d  →  B, S, d
+        out_B_S_d = transformer_out.transpose(0, 1)
+        valid_h = out_B_S_d[src_padding_mask]  # (N_tot, d)
 
-        if self.max_seq_len is None:
-            out = self.graph_pred_linear(h_graph)
-            return out
-        pred_list = []
-        for i in range(self.max_seq_len):
-            pred_list.append(self.graph_pred_linear_list[i](h_graph))
+        # build masks that align with valid_h
+        var_mask = batched_data.is_var_node.to(valid_h.device)
+        constr_mask = batched_data.is_constr_node.to(valid_h.device)
 
-        return pred_list
+        # per‑node scalar predictions
+        x_hat, lam_hat = self.head(valid_h, var_mask, constr_mask)
+        return x_hat, lam_hat
 
     def epoch_callback(self, epoch):
         # TODO: maybe unfreeze the gnn at the end.
@@ -209,3 +198,20 @@ class PositionalEncoding(nn.Module):
         """
         x = x + self.pe[: x.size(0)]
         return self.dropout(x)
+
+
+class VarConstHead(nn.Module):
+    def __init__(self, in_dim):
+        super().__init__()
+        self.to_xhat = nn.Sequential(nn.Linear(in_dim, 1))  # variables
+        self.to_lam = nn.Sequential(nn.Linear(in_dim, 1))  # constraints
+
+    def forward(self, h, var_mask, constr_mask):
+        """
+        h : (N_total, d)  –‑ node embeddings of the *batch*
+        var_mask, constr_mask come from `batch_graph`
+        (you can store them in data objects when you build them)
+        """
+        x_hat = self.to_xhat(h[var_mask]).squeeze(-1)  # (∑nᵢ,)
+        lam_hat = self.to_lam(h[constr_mask]).squeeze(-1)  # (∑mᵢ,)
+        return x_hat, lam_hat

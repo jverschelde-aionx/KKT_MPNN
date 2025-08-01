@@ -1,4 +1,5 @@
 import pickle
+from typing import Optional
 
 import numpy as np
 import torch
@@ -213,11 +214,9 @@ class GraphDataset(torch_geometric.data.Dataset):
         BG = bgData
         A, v_map, v_nodes, c_nodes, b_vars = BG
 
-        # Create dummy solution data since KKT training doesn't need ground truth
         # Extract variable names from the BG data structure
-        varNames = v_map if isinstance(v_map, list) else list(range(len(v_nodes)))
+        varNames = list(v_map.keys())
 
-        # Create dummy solutions and objectives (will be ignored in KKT training)
         n_vars = len(v_nodes)
         sols = np.zeros((1, n_vars))  # Single dummy solution
         objs = np.array([0.0])  # Single dummy objective
@@ -239,9 +238,9 @@ class GraphDataset(torch_geometric.data.Dataset):
 
         variable_features = v_nodes
         edge_features = A._values().unsqueeze(1)
-        edge_features = torch.ones(edge_features.shape)
 
-        constraint_features[np.isnan(constraint_features)] = 1
+        mask = torch.isnan(constraint_features)
+        constraint_features = constraint_features.masked_fill(mask, 1.0)
 
         graph = BipartiteNodeData(
             torch.FloatTensor(constraint_features),
@@ -276,22 +275,39 @@ class GraphDataset(torch_geometric.data.Dataset):
 
 class BipartiteNodeData(torch_geometric.data.Data):
     """
+    Node‑bipartite graph for MILP problems.
     This class encode a node bipartite graph observation as returned by the `ecole.observation.NodeBipartite`
     observation function in a format understood by the pytorch geometric data handlers.
+    Must support zero‑arg construction so that PyG's Batch can create
+    a template object internally.
     """
 
     def __init__(
         self,
-        constraint_features,
-        edge_indices,
-        edge_features,
-        variable_features,
+        constraint_features: Optional[torch.Tensor] = None,
+        edge_indices: Optional[torch.Tensor] = None,
+        edge_features: Optional[torch.Tensor] = None,
+        variable_features: Optional[torch.Tensor] = None,
     ):
         super().__init__()
+
+        # allow empty init (template object)
+        if constraint_features is None:
+            return
+
         self.constraint_features = constraint_features
         self.edge_index = edge_indices
         self.edge_attr = edge_features
         self.variable_features = variable_features
+
+        m = constraint_features.size(0)
+        n = variable_features.size(0)
+
+        self.is_var_node = torch.cat(
+            [torch.zeros(m, dtype=torch.bool), torch.ones(n, dtype=torch.bool)]
+        )
+
+        self.is_constr_node = ~self.is_var_node
 
     def __inc__(self, key, value, store, *args, **kwargs):
         """
@@ -343,33 +359,60 @@ class PolicyEncoder(torch.nn.Module):
         return h
 
 
-# This collate function is used to create batches of BipartiteNodeData objects.
 def collate(batch):
     """
-    A hand‑written collate_fn that turns a list of
-    BipartiteNodeData objects into one batch *and*
-    returns A, b, c with fixed sizes (m, n).
+    • Builds a PyG Batch (graphs with variable numbers of nodes)
+    • Pads (b, c) to the longest instance in *this* mini‑batch
+    • Keeps A sparse  (one sparse tensor per instance)
+    • Returns boolean masks telling which entries are real.
     """
-    graphs, A_list, b_list, c_list = [], [], [], []
-
+    graphs = []
+    A_list = []  # sparse (mᵢ × nᵢ)
+    b_list = []
+    c_list = []
+    m_sizes = []
+    n_sizes = []
+    print("kakadoela: ", type(batch))
     for data in batch:
-        graphs.append(data)  # still a pyg Data object
+        graphs.append(data)
+        m = data.constraint_features.size(0)
+        n = data.variable_features.size(0)
 
-        # Suppose `data.edge_index` holds (row, col) of A
-        #         `data.edge_attr`  holds the coefficient value
-        m, n = data.varInds[1][0].size(0), data.ntvars
-        A = torch.zeros(m, n, device=data.edge_index.device)
+        # store sizes
+        m_sizes.append(m)
+        n_sizes.append(n)
 
+        # sparse A as it came from the sample
         rows, cols = data.edge_index
-        A[rows, cols - m] = data.edge_attr.squeeze(-1)  # convert to dense
-        A_list.append(A)
+        A_sparse = torch.sparse_coo_tensor(
+            indices=torch.stack([rows, cols]),
+            values=data.edge_attr.squeeze(-1),
+            size=(m, n),
+        ).coalesce()
+        A_list.append(A_sparse)
 
-        b_list.append(data.constraint_features[:, 0])  # adapt to your layout
-        c_list.append(data.variable_features[:, 0])  # adapt to your layout
+        b_list.append(data.constraint_features[:, 0])  # (m,)
+        c_list.append(data.variable_features[:, 0])  # (n,)
 
+    B = len(batch)
+    max_m = max(m_sizes)
+    max_n = max(n_sizes)
+
+    # pad b and build its mask
+    b_pad = torch.zeros(B, max_m)
+    b_mask = torch.zeros(B, max_m, dtype=torch.bool)
+    for i, (b, m) in enumerate(zip(b_list, m_sizes)):
+        b_pad[i, :m] = b
+        b_mask[i, :m] = True
+
+    # pad c and build its mask
+    c_pad = torch.zeros(B, max_n)
+    c_mask = torch.zeros(B, max_n, dtype=torch.bool)
+    for i, (c, n) in enumerate(zip(c_list, n_sizes)):
+        c_pad[i, :n] = c
+        c_mask[i, :n] = True
+
+    # PyG batch of the graphs (still variable‑node)
     batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
-    A_batch = torch.stack(A_list)  # (B, m, n)
-    b_batch = torch.stack(b_list)  # (B, m)
-    c_batch = torch.stack(c_list)  # (B, n)
 
-    return batch_graph, A_batch, b_batch, c_batch
+    return batch_graph, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes

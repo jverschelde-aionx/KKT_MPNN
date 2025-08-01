@@ -37,60 +37,64 @@ class KKTLoss(nn.Module):
         self.reduction = reduction
 
     def forward(
-        self,
-        y_pred: torch.Tensor,  # (B, n+m) = [x̂ ‖ λ̂]
-        A: torch.Tensor,  # (B, m, n)
-        b: torch.Tensor,  # (B, m)
-        c: torch.Tensor,  # (n,) or (B, n)
-    ) -> torch.Tensor:
-        B = y_pred.size(0)
-        if y_pred.size(1) != self.n + self.m:
-            raise RuntimeError(
-                f"y_pred second dim={y_pred.size(1)} but expected {self.n + self.m}"
-            )
+        self, x_hat, lam_hat, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
+    ):
+        """
+        Computes four KKT terms for every instance *i*, then averages.
 
-        # split prediction
-        x_hat: torch.Tensor = y_pred[:, : self.n]  # (B, n)
-        lam_hat: torch.Tensor = y_pred[:, self.n :]  # (B, m)
+        • Ax – b   : use torch.sparse.mm
+        • stationarity: Aᵀ λ + c
+        • primal/dual feasibility & complementarity
+        """
+        B = len(A_list)
+        loss_primal = loss_dual = loss_stat = loss_comp = 0.0
 
-        # broadcast / reshape helpers
-        Ax: torch.Tensor = torch.bmm(A, x_hat.unsqueeze(-1)).squeeze(-1)  # (B, m)
-        c_exp: torch.Tensor = c if c.dim() == 2 else c.unsqueeze(0).expand(B, -1)
+        offset_x = 0
+        offset_l = 0
+        for i in range(B):
+            m, n = m_sizes[i], n_sizes[i]
 
-        # primal feasibility
-        primal_res = Ax - b  # (B, m)
-        primal_term = F.relu(primal_res).pow(2).mean(dim=1)  # (B,)
+            x_i = x_hat[offset_x : offset_x + n]
+            lam_i = lam_hat[offset_l : offset_l + m]
+            A_i = A_list[i].to(x_i.device)
 
-        # dual feasibility
-        dual_term = F.relu(-lam_hat).pow(2).mean(dim=1)  # (B,)
+            offset_x += n
+            offset_l += m
 
-        # stationarity
-        At_lambda = torch.bmm(A.transpose(1, 2), lam_hat.unsqueeze(-1)).squeeze(-1)
-        station_term = (c_exp + At_lambda).pow(2).mean(dim=1)  # (B,)
+            # Ax - b
+            Ax_minus_b = (A_i @ x_i.unsqueeze(-1)).squeeze(-1) - b_pad[i, :m]
 
-        # complementary slackness
-        comp_term = (lam_hat * primal_res).pow(2).mean(dim=1)  # (B,)
+            primal = torch.relu(Ax_minus_b).pow(2).mean()
+            dual = torch.relu(-lam_i).pow(2).mean()
 
-        # weighted sum of terms
-        loss_vec = (
-            self.w_primal * primal_term
-            + self.w_dual * dual_term
-            + self.w_station * station_term
-            + self.w_comp * comp_term
-        )  # (B,)
+            At_lambda = (A_i.t() @ lam_i.unsqueeze(-1)).squeeze(-1)
+            station = (c_pad[i, :n] + At_lambda).pow(2).mean()
+            compl = (lam_i * Ax_minus_b).pow(2).mean()
 
-        if self.reduction == "mean":
-            return loss_vec.mean()
-        if self.reduction == "sum":
-            return loss_vec.sum()
-        return loss_vec  # 'none'
+            loss_primal += primal
+            loss_dual += dual
+            loss_stat += station
+            loss_comp += compl
+
+        loss_primal /= B
+        loss_dual /= B
+        loss_stat /= B
+        loss_comp /= B
+
+        total = (
+            self.w_primal * loss_primal
+            + self.w_dual * loss_dual
+            + self.w_stat * loss_stat
+            + self.w_comp * loss_comp
+        )
+        return total
 
 
-class AdaptiveKKTLoss(KKTLoss):
-    def __init__(self, m: int, n: int, init: float = 0.1):
-        super().__init__(m, n, w_primal=init, w_dual=init, w_station=init, w_comp=init)
-        # register as parameters so they get optimised
-        self.w_primal = nn.Parameter(torch.tensor(init))
-        self.w_dual = nn.Parameter(torch.tensor(init))
-        self.w_station = nn.Parameter(torch.tensor(init))
-        self.w_comp = nn.Parameter(torch.tensor(init))
+# class AdaptiveKKTLoss(KKTLoss):
+#     def __init__(self, m: int, n: int, init: float = 0.1):
+#         super().__init__(m, n, w_primal=init, w_dual=init, w_station=init, w_comp=init)
+#         # register as parameters so they get optimised
+#         self.w_primal = nn.Parameter(torch.tensor(init))
+#         self.w_dual = nn.Parameter(torch.tensor(init))
+#         self.w_station = nn.Parameter(torch.tensor(init))
+#         self.w_comp = nn.Parameter(torch.tensor(init))
