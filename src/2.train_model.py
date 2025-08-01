@@ -15,12 +15,12 @@ import torch.optim as optim
 import yaml
 from loguru import logger
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
-from torch_geometric.loader import DataLoader
+from torch.utils.data import DataLoader
 
 import wandb
 from instances.common import COMBINATORIAL_AUCTION, INDEPENDANT_SET
 from models.gnn_transformer import GNNTransformer
-from models.losses import AdaptiveKKTLoss, KKTLoss
+from models.losses import KKTLoss
 from models.policy_encoder import GraphDataset, PolicyEncoder, collate
 
 
@@ -59,13 +59,16 @@ def train_epoch(
 ) -> float:
     model.train()
     total_loss, n_batches = 0.0, 0
-    for batch_graph, A, b, c in loader:
+    for batch_graph, A, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes in loader:
         batch_graph = batch_graph.to(device)
-        A, b, c = A.to(device), b.to(device), c.to(device)
+        b_pad = b_pad.to(device)
+        c_pad = c_pad.to(device)
 
         optimizer.zero_grad()
-        y_pred: torch.Tensor = model(batch_graph)  # (B, n+m)
-        loss: torch.Tensor = criterion(y_pred, A, b, c)
+        x_hat, lam_hat = model(batch_graph)  # (B, n+m)
+        loss: torch.Tensor = criterion(
+            x_hat, lam_hat, A, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
+        )
         loss.backward()
 
         if grad_clip:
@@ -225,9 +228,9 @@ def train():
     for problem in args.problems:
         dir_bg = Path(args.data_root) / problem / "BG"
         for dir in (dir_bg / "train").iterdir():
-            train_files.extend(os.listdir(dir))
+            train_files.extend([str(dir / f) for f in os.listdir(dir)])
         for dir in (dir_bg / "val").iterdir():
-            valid_files.extend(os.listdir(dir))
+            valid_files.extend([str(dir / f) for f in os.listdir(dir)])
 
     train_files = sorted(train_files)
     valid_files = sorted(valid_files)
@@ -253,13 +256,12 @@ def train():
     )
 
     # Retrieve problem instance dimensions (m,n) from the first sample
-    _, A0, b0, c0 = next(iter(valid_loader))
-    m, n = A0.size(1), A0.size(2)
+    (batch_graph, A_list, _b, _c, _bm, _cm, m_sizes, n_sizes) = next(iter(valid_loader))
+    m, n = m_sizes[0], n_sizes[0]
 
     # Model, loss, optimiser, scheduler
     node_encoder = PolicyEncoder(args)
     model = GNNTransformer(
-        num_tasks=m + n,
         args=args,
         gnn_node=node_encoder,
     ).to(device)
@@ -267,17 +269,13 @@ def train():
     logger.info("Model parameters: {}", model.count_parameters())
     wandb.watch(model)
 
-    loss_fn = (
-        KKTLoss(
-            m,
-            n,
-            w_primal=args.kkt_w_primal,
-            w_dual=args.kkt_w_dual,
-            w_station=args.kkt_w_station,
-            w_comp=args.kkt_w_comp,
-        )
-        if args.loss == "kkt"
-        else AdaptiveKKTLoss(m, n)
+    loss_fn = KKTLoss(
+        m,
+        n,
+        w_primal=args.kkt_w_primal,
+        w_dual=args.kkt_w_dual,
+        w_station=args.kkt_w_station,
+        w_comp=args.kkt_w_comp,
     )
 
     criterion = loss_fn.to(device)

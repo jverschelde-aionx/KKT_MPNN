@@ -66,23 +66,51 @@ def generate_CA_instances(
             lp_paths.append(lp_path)
 
 
-# Instance generation
-def generate_instances(settings: Settings) -> None:
-    lp_paths: List[Path] = []
+def solve_instance(
+    settings: Settings, lp_path: Path, solution_path: Path, log_dir: Path
+) -> None:
+    gp.setParam("LogToConsole", 0)
+    m = gp.read(str(lp_path))
+    m.Params.Threads = settings.gurobi_threads
+    m.Params.PoolSolutions = settings.gurobi_max_pool
+    m.Params.PoolSearchMode = settings.gurobi_pool_mode
+    m.Params.TimeLimit = settings.gurobi_max_time
+    m.Params.LogFile = str(log_dir / (lp_path.name + ".log"))
+    m.optimize()
 
+    sols, objs = [], []
+    var_names = [v.VarName for v in m.getVars()]
+    for sn in range(m.SolCount):
+        m.Params.SolutionNumber = sn
+        sols.append(np.array(m.Xn, dtype=np.float32))
+        objs.append(float(m.PoolObjVal))
+    sol_data = {
+        "var_names": var_names,
+        "sols": np.vstack(sols),
+        "objs": np.array(objs),
+    }
+
+    with open(solution_path, "wb") as f:
+        pickle.dump(sol_data, f)
+    m.dispose()
+
+
+def generate_instances(settings: Settings) -> None:
     for problem in settings.problems:
         logger.info("Generating instances for problem type: {}", problem)
-        test_instances = round(settings.n_instances * settings.test_split)
-        val_instances = round(settings.n_instances * settings.val_split)
-        train_instances = round(settings.n_instances - test_instances - val_instances)
 
-        sets = (
-            ("train", train_instances),
-            ("val", val_instances),
-            ("test", test_instances),
-        )
+        test_n = round(settings.n_instances * settings.test_split)
+        val_n = round(settings.n_instances * settings.val_split)
+        train_n = settings.n_instances - test_n - val_n
 
-        for split, n_instances in sets:
+        for split, n_instances in (
+            ("train", train_n),
+            ("val", val_n),
+            ("test", test_n),
+        ):
+            lp_paths: List[Path] = []
+
+            # generate the .lp files for this split only
             if problem == INDEPENDANT_SET:
                 generate_IS_instances(settings, split, n_instances, lp_paths)
             elif problem == COMBINATORIAL_AUCTION:
@@ -90,62 +118,43 @@ def generate_instances(settings: Settings) -> None:
             else:
                 raise ValueError(f"Unknown problem type: {problem}")
 
-        logger.info("Total .lp files to process: {}", len(lp_paths))
-        for lp_path in tqdm.tqdm(lp_paths, desc="Processing .lp files: "):
-            bg_dir = (
-                settings.data_root / problem / "BG" / split / f"{lp_path.parent.name}"
-            )
-            sol_dir = (
-                settings.data_root
-                / problem
-                / "solution"
-                / split
-                / f"{lp_path.parent.name}"
-            )
-            log_dir = (
-                settings.data_root / problem / "logs" / split / f"{lp_path.parent.name}"
-            )
-            for d in (bg_dir, sol_dir, log_dir):
-                d.mkdir(parents=True, exist_ok=True)
+            logger.info("[{}] {} .lp files to process", split, len(lp_paths))
 
-            solution_path = sol_dir / (lp_path.name + ".sol")
-            # Solve with Gurobi
-            if settings.solve and not solution_path.exists():
-                gp.setParam("LogToConsole", 0)
-                m = gp.read(str(lp_path))
-                m.Params.Threads = settings.gurobi_threads
-                m.Params.PoolSolutions = settings.gurobi_max_pool
-                m.Params.PoolSearchMode = settings.gurobi_pool_mode
-                m.Params.TimeLimit = settings.gurobi_max_time
-                m.Params.LogFile = str(log_dir / (lp_path.name + ".log"))
-                m.optimize()
+            # process those files
+            for lp_path in tqdm.tqdm(lp_paths, desc=f"Processing .lp files ({split})"):
+                bg_dir = (
+                    settings.data_root / problem / "BG" / split / lp_path.parent.name
+                )
+                sol_dir = (
+                    settings.data_root
+                    / problem
+                    / "solution"
+                    / split
+                    / lp_path.parent.name
+                )
+                log_dir = (
+                    settings.data_root / problem / "logs" / split / lp_path.parent.name
+                )
+                for d in (bg_dir, sol_dir, log_dir):
+                    d.mkdir(parents=True, exist_ok=True)
 
-                sols, objs = [], []
-                var_names = [v.VarName for v in m.getVars()]
-                for sn in range(m.SolCount):
-                    m.Params.SolutionNumber = sn
-                    sols.append(np.array(m.Xn, dtype=np.float32))
-                    objs.append(float(m.PoolObjVal))
-                sol_data = {
-                    "var_names": var_names,
-                    "sols": np.vstack(sols),
-                    "objs": np.array(objs),
-                }
+                solution_path = sol_dir / (lp_path.name + ".sol")
+                if settings.solve and not solution_path.exists():
+                    solve_instance(settings, lp_path, solution_path, log_dir)
 
-                with open(solution_path, "wb") as f:
-                    pickle.dump(sol_data, f)
-                m.dispose()
+                bg_path = bg_dir / (lp_path.name + ".bg")
+                if not bg_path.exists():
+                    try:
+                        graph_data = get_biparite_graph(str(lp_path))
+                    except Exception as e:
+                        logger.error("Failed on {} – {}", lp_path, e)
+                        continue
 
-            bg_path = bg_dir / (lp_path.name + ".bg")
+                    with open(bg_path, "wb") as f:
+                        pickle.dump(graph_data, f)
 
-            if not bg_path.exists():
-                # Extract bipartite graph
-                graph_data = get_biparite_graph(str(lp_path))
-                with open(bg_path, "wb") as f:
-                    print(bg_path)
-                    pickle.dump(graph_data, f)
         logger.success(
-            "All graphs for problem type {} written to {}",
+            "All graphs for {} written to {}",
             problem,
             settings.data_root / problem / "BG",
         )
@@ -174,7 +183,6 @@ def get_biparite_graph(lp_path: str):
     """
     Convert a .lp file into the 5‑tuple required by GraphDataset:
        A (sparse [m+1, n]), v_map, v_nodes, c_nodes, b_vars
-    Reproduces the logic in your helper.py but without GPU side‑effects.
     """
     m = scp.Model()
     m.hideOutput(True)
