@@ -2,7 +2,7 @@ import torch
 from loguru import logger
 
 
-def pad_batch(h_node, batch, max_input_len, get_mask=False):
+def pad_batch(h_node, batch, get_mask=False):
     num_batch = batch[-1] + 1
     num_nodes = []
     masks = []
@@ -13,7 +13,7 @@ def pad_batch(h_node, batch, max_input_len, get_mask=False):
         num_nodes.append(num_node)
 
     # logger.info(max(num_nodes))
-    max_num_nodes = min(max(num_nodes), max_input_len)
+    max_num_nodes = max(num_nodes)
     padded_h_node = h_node.data.new(max_num_nodes, num_batch, h_node.size(-1)).fill_(0)
     src_padding_mask = h_node.data.new(num_batch, max_num_nodes).fill_(0).bool()
 
@@ -49,5 +49,7 @@ def unpad_batch(padded_h_node, prev_h_node, num_nodes, origin_mask, max_num_node
         # logger.info("prev_h_node:", prev_h_node.size())
         # logger.info("padded_h_node:", padded_h_node.size())
         # logger.info("mask:", mask.size())
-        prev_h_node = prev_h_node.masked_scatter(mask.unsqueeze(-1), padded_h_node[-num_node:, i])
+        prev_h_node = prev_h_node.masked_scatter(
+            mask.unsqueeze(-1), padded_h_node[-num_node:, i]
+        )
     return prev_h_node

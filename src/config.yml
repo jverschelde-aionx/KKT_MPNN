@@ -1,14 +1,18 @@
 data:
   problems: ["IS","CA"]
-  is_sizes: [10, 50, 100, 200, 500, 1000, 2000, 5000,10000,20000,50000]
-  ca_sizes: [110, 50, 100, 200, 500, 1000, 2000, 5000,10000,20000,50000]
+  is_sizes: [10, 50, 100, 200, 500, 1000]
+  ca_sizes: [10, 50, 100, 200, 500, 1000]
   test_split: 0.15
   val_split: 0.15
-  n_instances: 1000
+  n_instances: 10000
   data_root: ../data
   solve: false
   gurobi_threads: 4
   n_jobs: 32
+  # Additional data parameters from graphtrans
+  dataset: "ogbg-code2"
+  aug: "baseline"
+  feature: "full"
 
 model:
   graph_pooling: mean
@@ -19,13 +23,37 @@ model:
   gnn_emb_dim: 300
   gnn_JK: last
   gnn_residual: false
+  # GNNPolicy specific parameters
+  embedding_size: 128
+  cons_nfeats: 4
+  edge_nfeats: 1
+  var_nfeats: 6
+  num_emb_type: periodic
+  num_emb_bins: 32
+  num_emb_freqs: 16
+  # Additional model parameters
+  model_type: "gnn"
+  pos_encoder: false
+  graph_input_dim: null
+
+# Transformer architecture parameters
+transformer:
+  d_model: 128
+  nhead: 4
+  dim_feedforward: 256
+  transformer_dropout: 0.1
+  transformer_activation: "relu"
+  num_encoder_layers: 4
+  transformer_norm_input: true
+  num_encoder_layers_masked: 0
+  transformer_prenorm: false
 
 training:
   devices: "0"
-  batch_size: 64
-  eval_batch_size: 64
+  batch_size: 2
+  eval_batch_size: 2
   epochs: 50
-  num_workers: 8
+  num_workers: 0
   lr: 0.001
   weight_decay: 0.0
   loss: kkt
@@ -37,3 +65,8 @@ training:
   kkt_w_dual: 0.1
   kkt_w_station: 0.6
   kkt_w_comp: 0.2
+  max_lr: 0.001
+  runs: 10
+  test_freq: 1
+  start_eval: 15
+  resume: null

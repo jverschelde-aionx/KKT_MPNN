@@ -109,7 +109,6 @@ class GNNTransformer(BaseModel):
         padded_h_node, src_padding_mask, num_nodes, mask, max_num_nodes = pad_batch(
             h_node,
             batched_data.batch,
-            self.transformer_encoder.max_input_len,
             get_mask=True,
         )  # Pad in the front
 

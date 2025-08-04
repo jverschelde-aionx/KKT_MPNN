@@ -105,7 +105,6 @@ class GNNTransformer(BaseModel):
         self.num_encoder_layers_masked = args.num_encoder_layers_masked
 
         self.head = VarConstHead(args.d_model)
-        self.max_seq_len = args.max_seq_len
 
     def forward(self, batched_data, perturb=None) -> Tuple[torch.Tensor, torch.Tensor]:
         # GNN encoding
@@ -115,7 +114,6 @@ class GNNTransformer(BaseModel):
         padded_h_node, src_padding_mask, num_nodes, mask, max_num_nodes = pad_batch(
             h_node,
             batched_data.batch,
-            self.transformer_encoder.max_input_len,
             get_mask=True,
         )  # Pad in the front
 
@@ -145,7 +143,7 @@ class GNNTransformer(BaseModel):
         # remove padding & flatten to (N_tot, d)
         # transformer_out: S, B, d  →  B, S, d
         out_B_S_d = transformer_out.transpose(0, 1)
-        valid_h = out_B_S_d[src_padding_mask]  # (N_tot, d)
+        valid_h = out_B_S_d[~src_padding_mask]  # (N_tot, d)
 
         # build masks that align with valid_h
         var_mask = batched_data.is_var_node.to(valid_h.device)

@@ -1,9 +1,13 @@
 import pickle
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch_geometric
+from rtdl_num_embeddings import PeriodicEmbeddings, PiecewiseLinearEmbeddings
+
+_CONS_PAD: int = 4  # global max constraint feature width
+_VAR_PAD: int = 26  # global max variable   feature width
 
 
 class GNNPolicy(torch.nn.Module):
@@ -11,9 +15,6 @@ class GNNPolicy(torch.nn.Module):
     def add_args(parser):
         BipartiteGraphConvolution.add_args(parser)
         group = parser.add_argument_group("GNNPolicy - MPNN Config")
-        group.add_argument(
-            "--embedding_size", default=64, type=int, help="Size of the node embeddings"
-        )
         group.add_argument(
             "--cons_nfeats",
             default=4,
@@ -26,6 +27,11 @@ class GNNPolicy(torch.nn.Module):
         group.add_argument(
             "--var_nfeats", default=6, type=int, help="Number of features for variables"
         )
+        group.add_argument(
+            "--num_emb_type", choices=["periodic", "pwl", "linear"], default="periodic"
+        )
+        group.add_argument("--num_emb_bins", type=int, default=32)  # for PWL
+        group.add_argument("--num_emb_freqs", type=int, default=16)  # for periodic
 
     @staticmethod
     def name(args):
@@ -34,75 +40,105 @@ class GNNPolicy(torch.nn.Module):
         name += f"-cons_nfeats={args.cons_nfeats}"
         name += f"-edge_nfeats={args.edge_nfeats}"
         name += f"-var_nfeats={args.var_nfeats}"
+        name += f"-num_emb_type={args.num_emb_type}"
+        if args.num_emb_type == "pwl":
+            name += f"-num_emb_bins={args.num_emb_bins}"
+        elif args.num_emb_type == "periodic":
+            name += f"-num_emb_freqs={args.num_emb_freqs}"
         return name
 
     def __init__(self, args):
         super().__init__()
-
-        # CONSTRAINT EMBEDDING
-        self.cons_embedding = torch.nn.Sequential(
-            torch.nn.LayerNorm(args.cons_nfeats),
-            torch.nn.Linear(args.cons_nfeats, args.embedding_size),
+        d_out = args.embedding_size
+        # Constraint embedding
+        self.cons_num_emb, cons_out_dim = self._build_numeric_block(
+            in_feats=args.cons_nfeats,
+            emb_type=args.num_emb_type,
+            n_freq=args.num_emb_freqs,
+            n_bins=args.num_emb_bins,
+        )
+        self.cons_proj = torch.nn.Sequential(
+            torch.nn.LayerNorm(cons_out_dim),
+            torch.nn.Linear(cons_out_dim, d_out),
             torch.nn.ReLU(),
-            torch.nn.Linear(args.embedding_size, args.embedding_size),
+            torch.nn.Linear(d_out, d_out),
             torch.nn.ReLU(),
         )
 
-        # EDGE EMBEDDING
-        self.edge_embedding = torch.nn.Sequential(
-            torch.nn.LayerNorm(args.edge_nfeats),
+        # Variable embedding
+        self.var_num_emb, var_out_dim = self._build_numeric_block(
+            in_feats=args.var_nfeats,
+            emb_type=args.num_emb_type,
+            n_freq=args.num_emb_freqs,
+            n_bins=args.num_emb_bins,
+        )
+        self.var_proj = torch.nn.Sequential(
+            torch.nn.LayerNorm(var_out_dim),
+            torch.nn.Linear(var_out_dim, d_out),
+            torch.nn.ReLU(),
+            torch.nn.Linear(d_out, d_out),
+            torch.nn.ReLU(),
         )
 
-        # VARIABLE EMBEDDING
-        self.var_embedding = torch.nn.Sequential(
-            torch.nn.LayerNorm(args.var_nfeats),
-            torch.nn.Linear(args.var_nfeats, args.embedding_size),
-            torch.nn.ReLU(),
-            torch.nn.Linear(args.embedding_size, args.embedding_size),
-            torch.nn.ReLU(),
-        )
+        # Edge embedding
+        self.edge_embedding = torch.nn.LayerNorm(args.edge_nfeats)
 
-        self.conv_v_to_c = BipartiteGraphConvolution()
-        self.conv_c_to_v = BipartiteGraphConvolution()
+        # Message‑passing layers
+        self.conv_v_to_c = BipartiteGraphConvolution(args)
+        self.conv_c_to_v = BipartiteGraphConvolution(args)
+        self.conv_v_to_c2 = BipartiteGraphConvolution(args)
+        self.conv_c_to_v2 = BipartiteGraphConvolution(args)
 
-        self.conv_v_to_c2 = BipartiteGraphConvolution()
-        self.conv_c_to_v2 = BipartiteGraphConvolution()
-
+        # Output module
         self.output_module = torch.nn.Sequential(
-            torch.nn.Linear(args.embedding_size, args.embedding_size),
+            torch.nn.Linear(d_out, d_out),
             torch.nn.ReLU(),
-            torch.nn.Linear(args.embedding_size, 1, bias=False),
+            torch.nn.Linear(d_out, 1, bias=False),
         )
 
     def forward(
-        self, constraint_features, edge_indices, edge_features, variable_features
-    ):
-        reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
+        self,
+        constraint_features,  # (n_c, cons_nfeats)
+        edge_indices,  # (2, |E|)
+        edge_features,  # (|E|, edge_nfeats)
+        variable_features,
+    ):  # (n_v, var_nfeats)
+        rev_idx = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
 
-        # First step: linear embedding layers to a common dimension (64)
-        constraint_features = self.cons_embedding(constraint_features)
-        edge_features = self.edge_embedding(edge_features)
-        variable_features = self.var_embedding(variable_features)
+        # numeric embeddings + small MLP
+        c = self.cons_proj(self.cons_num_emb(constraint_features))
+        v = self.var_proj(self.var_num_emb(variable_features))
+        e = self.edge_embedding(edge_features)
 
-        # Two half convolutions
-        constraint_features = self.conv_v_to_c(
-            variable_features, reversed_edge_indices, edge_features, constraint_features
-        )
-        variable_features = self.conv_c_to_v(
-            constraint_features, edge_indices, edge_features, variable_features
-        )
+        # two rounds of bipartite convolution
+        c = self.conv_v_to_c(v, rev_idx, e, c)
+        v = self.conv_c_to_v(c, edge_indices, e, v)
+        c = self.conv_v_to_c2(v, rev_idx, e, c)
+        v = self.conv_c_to_v2(c, edge_indices, e, v)
 
-        constraint_features = self.conv_v_to_c2(
-            variable_features, reversed_edge_indices, edge_features, constraint_features
-        )
-        variable_features = self.conv_c_to_v2(
-            constraint_features, edge_indices, edge_features, variable_features
-        )
+        # optional scalar head
+        return self.output_module(v).squeeze(-1)  # (n_v,)
 
-        # A final MLP on the variable features
-        output = self.output_module(variable_features).squeeze(-1)
+    @staticmethod
+    def _build_numeric_block(in_feats: int, emb_type: str, n_freq: int, n_bins: int):
+        """
+        Returns (module, out_dim).
+        If emb_type == 'linear' the module is nn.Identity().
+        """
+        if emb_type == "periodic":
+            emb = PeriodicEmbeddings(
+                n_features=in_feats, n_frequencies=n_freq, lite=True
+            )
+            out_dim = in_feats * (2 * n_freq)
+            return torch.nn.Sequential(emb, torch.nn.Flatten(start_dim=1)), out_dim
 
-        return output
+        if emb_type == "pwl":
+            emb = PiecewiseLinearEmbeddings(n_features=in_feats, num_bins=n_bins)
+            out_dim = in_feats * n_bins
+            return torch.nn.Sequential(emb, torch.nn.Flatten(start_dim=1)), out_dim
+
+        # linear baseline
+        return torch.nn.Identity(), in_feats
 
 
 class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
@@ -113,7 +149,6 @@ class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
 
     @staticmethod
     def add_args(parser):
-        BipartiteGraphConvolution.add_args(parser)
         group = parser.add_argument_group("BipartiteGraphConvolution - MPNN Config")
         # The embedding size is the size of the node embeddings
         group.add_argument(
@@ -165,10 +200,6 @@ class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
             size=(left_features.shape[0], right_features.shape[0]),
             node_features=(left_features, right_features),
             edge_features=edge_features,
-        )
-        b = torch.cat([self.post_conv_module(output), right_features], dim=-1)
-        a = self.output_module(
-            torch.cat([self.post_conv_module(output), right_features], dim=-1)
         )
 
         return self.output_module(
@@ -344,9 +375,9 @@ class PolicyEncoder(torch.nn.Module):
 
         # identical to first part of original GNNPolicy.forward
         rev_idx = torch.stack([e_idx[1], e_idx[0]], dim=0)
-        c = self.base.cons_embedding(c)
+        c = self.base.cons_proj(self.base.cons_num_emb(c))
         e = self.base.edge_embedding(e_attr)
-        v = self.base.var_embedding(v)
+        v = self.base.var_proj(self.base.var_num_emb(v))
 
         c = self.base.conv_v_to_c(v, rev_idx, e, c)
         v = self.base.conv_c_to_v(c, e_idx, e, v)
@@ -359,30 +390,48 @@ class PolicyEncoder(torch.nn.Module):
         return h
 
 
-def collate(batch):
-    """
-    • Builds a PyG Batch (graphs with variable numbers of nodes)
-    • Pads (b, c) to the longest instance in *this* mini‑batch
-    • Keeps A sparse  (one sparse tensor per instance)
-    • Returns boolean masks telling which entries are real.
-    """
-    graphs = []
-    A_list = []  # sparse (mᵢ × nᵢ)
-    b_list = []
-    c_list = []
-    m_sizes = []
-    n_sizes = []
-    print("kakadoela: ", type(batch))
-    for data in batch:
-        graphs.append(data)
-        m = data.constraint_features.size(0)
-        n = data.variable_features.size(0)
+def _right_pad(x: torch.Tensor, target: int) -> torch.Tensor:
+    # Pads the last dim of `x` with zeros on the right up to `target`.
+    if x.size(1) == target:
+        return x
+    pad_width: int = target - x.size(1)
+    pad: torch.Tensor = torch.zeros(
+        x.size(0), pad_width, dtype=x.dtype, device=x.device
+    )
+    return torch.cat([x, pad], dim=1)
 
-        # store sizes
+
+def collate(
+    batch: List["BipartiteNodeData"],
+) -> Tuple[
+    torch_geometric.data.Batch,  # batch_graph
+    List[torch.Tensor],  # A_list (sparse)
+    torch.Tensor,
+    torch.Tensor,  # b_pad , c_pad
+    torch.Tensor,
+    torch.Tensor,  # b_mask, c_mask
+    List[int],
+    List[int],  # m_sizes, n_sizes
+]:
+    graphs: List["BipartiteNodeData"] = []
+    A_list: List[torch.Tensor] = []
+    b_list: List[torch.Tensor] = []
+    c_list: List[torch.Tensor] = []
+    m_sizes: List[int] = []
+    n_sizes: List[int] = []
+
+    for data in batch:
+        # ----- enforce fixed feature width ---------------------------
+        data.constraint_features = _right_pad(data.constraint_features, _CONS_PAD)
+        data.variable_features = _right_pad(data.variable_features, _VAR_PAD)
+
+        graphs.append(data)
+
+        m: int = data.constraint_features.size(0)
+        n: int = data.variable_features.size(0)
         m_sizes.append(m)
         n_sizes.append(n)
 
-        # sparse A as it came from the sample
         rows, cols = data.edge_index
         A_sparse = torch.sparse_coo_tensor(
             indices=torch.stack([rows, cols]),
@@ -391,28 +440,36 @@ def collate(batch):
         ).coalesce()
         A_list.append(A_sparse)
 
-        b_list.append(data.constraint_features[:, 0])  # (m,)
-        c_list.append(data.variable_features[:, 0])  # (n,)
+        b_list.append(data.constraint_features[:, 0])  # any column is fine
+        c_list.append(data.variable_features[:, 0])
 
-    B = len(batch)
-    max_m = max(m_sizes)
-    max_n = max(n_sizes)
+    B: int = len(batch)
+    max_m: int = max(m_sizes)
+    max_n: int = max(n_sizes)
 
-    # pad b and build its mask
-    b_pad = torch.zeros(B, max_m)
-    b_mask = torch.zeros(B, max_m, dtype=torch.bool)
+    b_pad: torch.Tensor = torch.zeros(B, max_m)
+    b_mask: torch.Tensor = torch.zeros(B, max_m, dtype=torch.bool)
     for i, (b, m) in enumerate(zip(b_list, m_sizes)):
         b_pad[i, :m] = b
         b_mask[i, :m] = True
 
-    # pad c and build its mask
-    c_pad = torch.zeros(B, max_n)
-    c_mask = torch.zeros(B, max_n, dtype=torch.bool)
+    c_pad: torch.Tensor = torch.zeros(B, max_n)
+    c_mask: torch.Tensor = torch.zeros(B, max_n, dtype=torch.bool)
     for i, (c, n) in enumerate(zip(c_list, n_sizes)):
         c_pad[i, :n] = c
         c_mask[i, :n] = True
 
-    # PyG batch of the graphs (still variable‑node)
-    batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
+    batch_graph: torch_geometric.data.Batch = torch_geometric.data.Batch.from_data_list(
+        graphs
+    )
 
-    return batch_graph, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
+    return (
+        batch_graph,
+        A_list,
+        b_pad,
+        c_pad,
+        b_mask,
+        c_mask,
+        m_sizes,
+        n_sizes,
+    )
