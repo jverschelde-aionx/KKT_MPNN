@@ -42,6 +42,7 @@ dependencies:
   - python-dateutil
   - pytz
   - pyyaml
+  - pytest
   - ecole
   - pyparsing
   - configargparse
@@ -86,4 +87,5 @@ dependencies:
       - gurobipy
       - pyscipopt
       - ase
+      - rtdl_num_embeddings
       - loguru

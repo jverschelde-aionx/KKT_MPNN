@@ -15,17 +15,12 @@ class TransformerNodeEncoder(nn.Module):
         group.add_argument(
             "--dim_feedforward",
             type=int,
-            default=512,
+            default=256,
             help="transformer feedforward dim",
         )
         group.add_argument("--transformer_dropout", type=float, default=0.3)
         group.add_argument("--transformer_activation", type=str, default="relu")
         group.add_argument("--num_encoder_layers", type=int, default=4)
-        group.add_argument(
-            "--max_input_len",
-            default=1000,
-            help="The max input length of transformer input",
-        )
         group.add_argument(
             "--transformer_norm_input", action="store_true", default=False
         )
@@ -47,7 +42,6 @@ class TransformerNodeEncoder(nn.Module):
         self.transformer = nn.TransformerEncoder(
             encoder_layer, args.num_encoder_layers, encoder_norm
         )
-        self.max_input_len = args.max_input_len
 
         self.norm_input = None
         if args.transformer_norm_input:

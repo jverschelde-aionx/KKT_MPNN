@@ -21,31 +21,73 @@ import wandb
 from instances.common import COMBINATORIAL_AUCTION, INDEPENDANT_SET
 from models.gnn_transformer import GNNTransformer
 from models.losses import KKTLoss
-from models.policy_encoder import GraphDataset, PolicyEncoder, collate
+from models.policy_encoder import GNNPolicy, GraphDataset, PolicyEncoder, collate
 
 
 @torch.no_grad()
 def kkt_metrics(
-    y_pred: torch.Tensor, A: torch.Tensor, b: torch.Tensor, c: torch.Tensor
-) -> Dict[str, float]:
+    x_hat: torch.Tensor,  # (Σ nᵢ,)
+    lam_hat: torch.Tensor,  # (Σ mᵢ,)
+    A_list: list,  # list[torch.sparse_coo_tensor]
+    b_pad: torch.Tensor,  # (B, max_m)
+    c_pad: torch.Tensor,  # (B, max_n)
+    b_mask: torch.Tensor,  # (B, max_m)
+    c_mask: torch.Tensor,  # (B, max_n)
+    m_sizes: list,  # [m₀, …, m_{B‑1}]
+    n_sizes: list,  # [n₀, …, n_{B‑1}]
+) -> dict[str, float]:
     """
-    Compute each KKT term separately for logging.
-    Shapes: see KKTLoss.
+    Computes per‑instance KKT residuals and returns batch averages
+    **without allocating new CUDA memory in the inner loop**.
     """
-    B, m, n = A.size(0), A.size(1), A.size(2)
-    x_hat, lam_hat = y_pred[:, :n], y_pred[:, n:]
-    Ax_minus_b = torch.bmm(A, x_hat.unsqueeze(-1)).squeeze(-1) - b
-    primal = torch.relu(Ax_minus_b).pow(2).mean(dim=1).mean().item()
-    dual = torch.relu(-lam_hat).pow(2).mean(dim=1).mean().item()
-    At_lambda = torch.bmm(A.transpose(1, 2), lam_hat.unsqueeze(-1)).squeeze(-1)
-    c_exp = c if c.dim() == 2 else c.unsqueeze(0).expand(B, -1)
-    station = (c_exp + At_lambda).pow(2).mean(dim=1).mean().item()
-    comp = (lam_hat * Ax_minus_b).pow(2).mean(dim=1).mean().item()
+    B = len(A_list)
+    device = x_hat.device  # everything should live here
+
+    # Move every sparse matrix to the correct device exactly ONCE.
+    # .to(device) is a no‑op when already resident, so this is cheap.
+    A_list = [
+        A if A.device == device else A.to(device, non_blocking=True) for A in A_list
+    ]
+
+    sum_primal = sum_dual = sum_station = sum_comp = 0.0
+    off_x = off_l = 0
+
+    for i, A_i in enumerate(A_list):
+        m, n = m_sizes[i], n_sizes[i]
+
+        x_i = x_hat[off_x : off_x + n]
+        lam_i = lam_hat[off_l : off_l + m]
+        off_x += n
+        off_l += m
+
+        Ax_minus_b = (
+            torch.sparse.mm(
+                A_i,
+                x_i.unsqueeze(-1),  # (m, 1)
+            ).squeeze(-1)
+            - b_pad[i, :m]
+        )
+
+        primal = torch.relu(Ax_minus_b).square().mean()
+        dual = torch.relu(-lam_i).square().mean()
+        station = (
+            (torch.sparse.mm(A_i.t(), lam_i.unsqueeze(-1)).squeeze(-1) + c_pad[i, :n])
+            .square()
+            .mean()
+        )
+        compl = (lam_i * Ax_minus_b).square().mean()
+
+        sum_primal += primal.item()
+        sum_dual += dual.item()
+        sum_station += station.item()
+        sum_comp += compl.item()
+
+    inv_B = 1.0 / B
     return {
-        "primal": primal,
-        "dual": dual,
-        "stationarity": station,
-        "compl_slack": comp,
+        "primal": sum_primal * inv_B,
+        "dual": sum_dual * inv_B,
+        "stationarity": sum_station * inv_B,
+        "compl_slack": sum_comp * inv_B,
     }
 
 
@@ -81,23 +123,23 @@ def train_epoch(
 
 
 @torch.no_grad()
-def eval_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: KKTLoss,
-    device: torch.device,
-) -> Tuple[float, Dict[str, float]]:
+def eval_epoch(model, loader, criterion, device):
     model.eval()
     total_loss, n_batches = 0.0, 0
     term_sums = {"primal": 0.0, "dual": 0.0, "stationarity": 0.0, "compl_slack": 0.0}
 
-    for batch_graph, A, b, c in loader:
+    for batch_graph, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes in loader:
         batch_graph = batch_graph.to(device)
-        A, b, c = A.to(device), b.to(device), c.to(device)
+        b_pad, c_pad = b_pad.to(device), c_pad.to(device)
 
-        y_pred = model(batch_graph)
-        loss = criterion(y_pred, A, b, c)
-        metrics = kkt_metrics(y_pred, A, b, c)
+        x_hat, lam_hat = model(batch_graph)
+        loss = criterion(
+            x_hat, lam_hat, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
+        )
+        # metrics
+        metrics = kkt_metrics(
+            x_hat, lam_hat, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
+        )
 
         total_loss += loss.item()
         for k in term_sums:
@@ -112,7 +154,16 @@ def train():
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
         description="[KKT] Train GNN-Transformer",
+        default_config_files=["config.yml"],
     )
+    # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+    #     "garbage_collection_threshold:0.6,max_split_size_mb:128"
+    # )
+    # Add GNNPolicy specific arguments
+    GNNPolicy.add_args(parser)
+
+    # Add GNNTransformer specific arguments
+    GNNTransformer.add_args(parser)
 
     # Model
     m = parser.add_argument_group("model")
@@ -124,12 +175,18 @@ def train():
     m.add_argument("--gnn_emb_dim", type=int, default=300)
     m.add_argument("--gnn_JK", type=str, default="last")
     m.add_argument("--gnn_residual", action="store_true")
+    m.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=None,
+        help="maximum sequence length to predict (default: None)",
+    )
 
     # Training
     t = parser.add_argument_group("training")
     t.add_argument("--devices", type=str, default="0")
-    t.add_argument("--batch_size", type=int, default=64)
-    t.add_argument("--eval_batch_size", type=int, default=None)
+    t.add_argument("--batch_size", type=int, default=4)
+    t.add_argument("--eval_batch_size", type=int, default=4)
     t.add_argument("--epochs", type=int, default=30)
     t.add_argument("--num_workers", type=int, default=0)
     t.add_argument("--lr", type=float, default=1e-3)
@@ -255,6 +312,8 @@ def train():
         collate_fn=collate,
     )
 
+    print(args)
+
     # Retrieve problem instance dimensions (m,n) from the first sample
     (batch_graph, A_list, _b, _c, _bm, _cm, m_sizes, n_sizes) = next(iter(valid_loader))
     m, n = m_sizes[0], n_sizes[0]
@@ -274,7 +333,7 @@ def train():
         n,
         w_primal=args.kkt_w_primal,
         w_dual=args.kkt_w_dual,
-        w_station=args.kkt_w_station,
+        w_stat=args.kkt_w_station,
         w_comp=args.kkt_w_comp,
     )
 
