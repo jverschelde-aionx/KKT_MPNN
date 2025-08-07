@@ -12,83 +12,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import yaml
 from loguru import logger
+from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 import wandb
 from instances.common import COMBINATORIAL_AUCTION, INDEPENDANT_SET
 from models.gnn_transformer import GNNTransformer
-from models.losses import KKTLoss
+from models.losses import KKTLoss, kkt_metrics
 from models.policy_encoder import GNNPolicy, GraphDataset, PolicyEncoder, collate
-
-
-@torch.no_grad()
-def kkt_metrics(
-    x_hat: torch.Tensor,  # (Σ nᵢ,)
-    lam_hat: torch.Tensor,  # (Σ mᵢ,)
-    A_list: list,  # list[torch.sparse_coo_tensor]
-    b_pad: torch.Tensor,  # (B, max_m)
-    c_pad: torch.Tensor,  # (B, max_n)
-    b_mask: torch.Tensor,  # (B, max_m)
-    c_mask: torch.Tensor,  # (B, max_n)
-    m_sizes: list,  # [m₀, …, m_{B‑1}]
-    n_sizes: list,  # [n₀, …, n_{B‑1}]
-) -> dict[str, float]:
-    """
-    Computes per‑instance KKT residuals and returns batch averages
-    **without allocating new CUDA memory in the inner loop**.
-    """
-    B = len(A_list)
-    device = x_hat.device  # everything should live here
-
-    # Move every sparse matrix to the correct device exactly ONCE.
-    # .to(device) is a no‑op when already resident, so this is cheap.
-    A_list = [
-        A if A.device == device else A.to(device, non_blocking=True) for A in A_list
-    ]
-
-    sum_primal = sum_dual = sum_station = sum_comp = 0.0
-    off_x = off_l = 0
-
-    for i, A_i in enumerate(A_list):
-        m, n = m_sizes[i], n_sizes[i]
-
-        x_i = x_hat[off_x : off_x + n]
-        lam_i = lam_hat[off_l : off_l + m]
-        off_x += n
-        off_l += m
-
-        Ax_minus_b = (
-            torch.sparse.mm(
-                A_i,
-                x_i.unsqueeze(-1),  # (m, 1)
-            ).squeeze(-1)
-            - b_pad[i, :m]
-        )
-
-        primal = torch.relu(Ax_minus_b).square().mean()
-        dual = torch.relu(-lam_i).square().mean()
-        station = (
-            (torch.sparse.mm(A_i.t(), lam_i.unsqueeze(-1)).squeeze(-1) + c_pad[i, :n])
-            .square()
-            .mean()
-        )
-        compl = (lam_i * Ax_minus_b).square().mean()
-
-        sum_primal += primal.item()
-        sum_dual += dual.item()
-        sum_station += station.item()
-        sum_comp += compl.item()
-
-    inv_B = 1.0 / B
-    return {
-        "primal": sum_primal * inv_B,
-        "dual": sum_dual * inv_B,
-        "stationarity": sum_station * inv_B,
-        "compl_slack": sum_comp * inv_B,
-    }
 
 
 def train_epoch(
@@ -96,6 +29,7 @@ def train_epoch(
     loader: DataLoader,
     criterion: KKTLoss,
     optimizer: optim.Optimizer,
+    scaler: GradScaler,
     device: torch.device,
     grad_clip: float | None = None,
 ) -> float:
@@ -106,24 +40,34 @@ def train_epoch(
         b_pad = b_pad.to(device)
         c_pad = c_pad.to(device)
 
-        optimizer.zero_grad()
-        x_hat, lam_hat = model(batch_graph)  # (B, n+m)
-        loss: torch.Tensor = criterion(
-            x_hat, lam_hat, A, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
-        )
-        loss.backward()
+        optimizer.zero_grad(set_to_none=True)
+        # Automatic Mixed Precision (AMP) training
+        with autocast(enabled=scaler.is_enabled()):
+            x_hat, lam_hat = model(batch_graph)  # fwd
+            loss = criterion(
+                x_hat, lam_hat, A, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
+            )
+        # Backward pass with gradient scaling
+        scaler.scale(loss).backward()
 
         if grad_clip:
+            scaler.unscale_(optimizer)  # unscale before clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+
+        # optimizer & scaler housekeeping
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item()
         n_batches += 1
+
     return total_loss / n_batches
 
 
 @torch.no_grad()
-def eval_epoch(model, loader, criterion, device):
+def eval_epoch(
+    model, loader, criterion, device, amp=False
+) -> Tuple[float, Dict[str, float]]:
     model.eval()
     total_loss, n_batches = 0.0, 0
     term_sums = {"primal": 0.0, "dual": 0.0, "stationarity": 0.0, "compl_slack": 0.0}
@@ -132,10 +76,11 @@ def eval_epoch(model, loader, criterion, device):
         batch_graph = batch_graph.to(device)
         b_pad, c_pad = b_pad.to(device), c_pad.to(device)
 
-        x_hat, lam_hat = model(batch_graph)
-        loss = criterion(
-            x_hat, lam_hat, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
-        )
+        with autocast(enabled=amp):
+            x_hat, lam_hat = model(batch_graph)
+            loss = criterion(
+                x_hat, lam_hat, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
+            )
         # metrics
         metrics = kkt_metrics(
             x_hat, lam_hat, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
@@ -197,6 +142,10 @@ def train():
     )
     t.add_argument("--pct_start", type=float, default=0.3)  # OneCycle
     t.add_argument("--grad_clip", type=float, default=1.0)
+    t.add_argument(
+        "--amp", action="store_true", help="Use automatic mixed precision (fp16/bf16)"
+    )
+
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--kkt_w_primal", type=float, default=0.1)
     t.add_argument("--kkt_w_dual", type=float, default=0.1)
@@ -317,6 +266,9 @@ def train():
     # Retrieve problem instance dimensions (m,n) from the first sample
     (batch_graph, A_list, _b, _c, _bm, _cm, m_sizes, n_sizes) = next(iter(valid_loader))
     m, n = m_sizes[0], n_sizes[0]
+    args.cons_nfeats = batch_graph.constraint_features.size(1)
+    args.var_nfeats = batch_graph.variable_features.size(1)
+    args.edge_nfeats = batch_graph.edge_attr.size(1)
 
     # Model, loss, optimiser, scheduler
     node_encoder = PolicyEncoder(args)
@@ -326,7 +278,7 @@ def train():
     ).to(device)
 
     logger.info("Model parameters: {}", model.count_parameters())
-    wandb.watch(model)
+    wandb.watch(model, log="gradients", log_graph=False)
 
     loss_fn = KKTLoss(
         m,
@@ -341,6 +293,7 @@ def train():
     optimizer = optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
+    scaler = GradScaler(enabled=args.amp)
 
     if args.scheduler == "plateau":
         scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
@@ -369,6 +322,7 @@ def train():
             train_loader,
             criterion,
             optimizer,
+            scaler,
             device,
             grad_clip=args.grad_clip,
         )
@@ -376,7 +330,9 @@ def train():
         if isinstance(scheduler, OneCycleLR):
             scheduler.step()
 
-        val_loss, val_terms = eval_epoch(model, valid_loader, criterion, device)
+        val_loss, val_terms = eval_epoch(
+            model, valid_loader, criterion, device, args.amp
+        )
 
         if isinstance(scheduler, ReduceLROnPlateau):
             scheduler.step(val_loss)

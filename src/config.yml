@@ -50,16 +50,17 @@ transformer:
 
 training:
   devices: "0"
-  batch_size: 2
-  eval_batch_size: 2
+  batch_size: 4
+  eval_batch_size: 4
   epochs: 50
   num_workers: 0
   lr: 0.001
   weight_decay: 0.0
   loss: kkt
-  scheduler: cosine
+  scheduler: none
   pct_start: 0.3
   grad_clip: 1.0
+  amp: true
   seed: 42
   kkt_w_primal: 0.1
   kkt_w_dual: 0.1

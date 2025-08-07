@@ -107,6 +107,7 @@ class GNNPolicy(torch.nn.Module):
 
         # numeric embeddings + small MLP
         c = self.cons_proj(self.cons_num_emb(constraint_features))
+
         v = self.var_proj(self.var_num_emb(variable_features))
         e = self.edge_embedding(edge_features)
 
@@ -120,25 +121,34 @@ class GNNPolicy(torch.nn.Module):
         return self.output_module(v).squeeze(-1)  # (n_v,)
 
     @staticmethod
-    def _build_numeric_block(in_feats: int, emb_type: str, n_freq: int, n_bins: int):
-        """
-        Returns (module, out_dim).
-        If emb_type == 'linear' the module is nn.Identity().
-        """
+    def _build_numeric_block(
+        in_feats: int,
+        emb_type: str,
+        n_freq: int,
+        n_bins: int,
+    ) -> Tuple[torch.nn.Module, int]:
+        # Build numeric embedding and return (module, output_dim).
+
         if emb_type == "periodic":
-            emb = PeriodicEmbeddings(
-                n_features=in_feats, n_frequencies=n_freq, lite=True
+            emb_layer = PeriodicEmbeddings(
+                n_features=in_feats,
+                n_frequencies=n_freq,
+                lite=True,  # keep your current setting
             )
-            out_dim = in_feats * (2 * n_freq)
-            return torch.nn.Sequential(emb, torch.nn.Flatten(start_dim=1)), out_dim
+        elif emb_type == "pwl":
+            emb_layer = PiecewiseLinearEmbeddings(
+                n_features=in_feats,
+                num_bins=n_bins,
+            )
+        else:  # "linear"
+            return torch.nn.Identity(), in_feats
 
-        if emb_type == "pwl":
-            emb = PiecewiseLinearEmbeddings(n_features=in_feats, num_bins=n_bins)
-            out_dim = in_feats * n_bins
-            return torch.nn.Sequential(emb, torch.nn.Flatten(start_dim=1)), out_dim
+        # Determine the true output width by a forward pass on a dummy tensor.
+        with torch.no_grad():
+            dummy: torch.Tensor = torch.zeros(1, in_feats)
+            out_dim: int = emb_layer(dummy).numel()
 
-        # linear baseline
-        return torch.nn.Identity(), in_feats
+        return torch.nn.Sequential(emb_layer, torch.nn.Flatten(start_dim=1)), out_dim
 
 
 class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
@@ -207,13 +217,6 @@ class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
         )
 
     def message(self, node_features_i, node_features_j, edge_features):
-        # node_features_i,the node to be aggregated
-        # node_features_j,the neighbors of the node i
-
-        # print("node_features_i:",node_features_i.shape)
-        # print("node_features_j",node_features_j.shape)
-        # print("edge_features:",edge_features.shape)
-
         output = self.feature_module_final(
             self.feature_module_left(node_features_i)
             + self.feature_module_edge(edge_features)
