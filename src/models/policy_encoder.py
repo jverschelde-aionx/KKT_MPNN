@@ -273,8 +273,20 @@ class GraphDataset(torch_geometric.data.Dataset):
         variable_features = v_nodes
         edge_features = A._values().unsqueeze(1)
 
-        mask = torch.isnan(constraint_features)
-        constraint_features = constraint_features.masked_fill(mask, 1.0)
+        constraint_features = torch.as_tensor(constraint_features, dtype=torch.float32)
+        variable_features = torch.as_tensor(variable_features, dtype=torch.float32)
+        edge_features = torch.as_tensor(edge_features, dtype=torch.float32)
+
+        # Replace NaN / ±Inf with finite values
+        constraint_features = torch.nan_to_num(
+            constraint_features, nan=0.0, posinf=1e6, neginf=-1e6
+        )
+        variable_features = torch.nan_to_num(
+            variable_features, nan=0.0, posinf=1e6, neginf=-1e6
+        )
+        edge_features = torch.nan_to_num(
+            edge_features, nan=0.0, posinf=1e6, neginf=-1e6
+        )
 
         graph = BipartiteNodeData(
             torch.FloatTensor(constraint_features),
@@ -291,6 +303,9 @@ class GraphDataset(torch_geometric.data.Dataset):
         graph.nsols = sols.shape[0]
         graph.ntvars = variable_features.shape[0]
         graph.varNames = varNames
+        graph.sample_idx = index
+        graph.sample_path = self.sample_files[index]
+
         varname_dict = {}
         varname_map = []
         i = 0
@@ -424,6 +439,11 @@ def collate(
     n_sizes: List[int] = []
 
     for data in batch:
+        assert torch.isfinite(data.variable_features).all(), (
+            "NaN/Inf in variable_features"
+        )
+        assert torch.isfinite(data.edge_attr).all(), "NaN/Inf in edge values"
+
         # ----- enforce fixed feature width ---------------------------
         data.constraint_features = _right_pad(data.constraint_features, _CONS_PAD)
         data.variable_features = _right_pad(data.variable_features, _VAR_PAD)
@@ -465,6 +485,7 @@ def collate(
     batch_graph: torch_geometric.data.Batch = torch_geometric.data.Batch.from_data_list(
         graphs
     )
+    sources = [data.sample_path for data in batch]
 
     return (
         batch_graph,
@@ -475,4 +496,5 @@ def collate(
         c_mask,
         m_sizes,
         n_sizes,
+        sources,
     )
