@@ -39,13 +39,13 @@ def generate() -> None:
         "--is_sizes",
         type=int,
         nargs="+",
-        default=[10, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 50000],
+        default=[10, 50, 100, 200, 500, 1000],
     )
     d.add_argument(
         "--ca_sizes",
         type=int,
         nargs="+",
-        default=[10, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 50000],
+        default=[10, 50, 100, 200, 500, 1000],
     )
     d.add_argument(
         "--n_instances", type=int, default=1000, help="Number of instances per size"
