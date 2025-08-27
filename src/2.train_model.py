@@ -63,8 +63,10 @@ def _finite_stats(t: torch.Tensor) -> dict:
     # Safely compute stats even if all values are non‑finite
     t_det = t.detach()
     finite = torch.isfinite(t_det)
+    numel = t_det.numel()
+
     out = {
-        "finite_frac": finite.float().mean().item(),
+        "finite_frac": (finite.float().mean().item() if numel > 0 else 1.0),
         "has_nan": torch.isnan(t_det).any().item(),
         "has_inf": torch.isinf(t_det).any().item(),
     }
@@ -110,37 +112,8 @@ def train_epoch(
     grad_clip: float | None = None,
     start_step: int = 0,
     log_every: int = 50,
+    scheduler: optim.lr_scheduler._LRScheduler | None = None,
 ) -> tuple[float, int]:
-    # model.train()
-    # total_loss, n_batches = 0.0, 0
-    # for batch_graph, A, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes in loader:
-    #     batch_graph = batch_graph.to(device)
-    #     b_pad = b_pad.to(device)
-    #     c_pad = c_pad.to(device)
-
-    #     optimizer.zero_grad(set_to_none=True)
-    #     # Automatic Mixed Precision (AMP) training
-    #     with autocast(enabled=scaler.is_enabled()):
-    #         x_hat, lam_hat = model(batch_graph)  # fwd
-    #         loss = criterion(
-    #             x_hat, lam_hat, A, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
-    #         )
-    #     # Backward pass with gradient scaling
-    #     scaler.scale(loss).backward()
-
-    #     if grad_clip:
-    #         scaler.unscale_(optimizer)  # unscale before clipping
-    #         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-
-    #     # optimizer & scaler housekeeping
-    #     scaler.step(optimizer)
-    #     scaler.update()
-
-    #     total_loss += loss.item()
-    #     n_batches += 1
-
-    # return total_loss / n_batches
-
     model.train()
     total_loss, n_batches = 0.0, 0
     step = start_step
@@ -159,9 +132,6 @@ def train_epoch(
         ) = batch
 
         step += 1
-
-        # if step != 47223:
-        #     continue
 
         batch_graph = batch_graph.to(device)
         b_pad = b_pad.to(device)
@@ -197,15 +167,14 @@ def train_epoch(
             frac_neg = (lam_hat < 0).float().mean().item()
             wandb.log({"pred/lam_neg_frac": frac_neg}, step=step)
 
-        # now compute the real loss and backward
         with autocast(enabled=scaler.is_enabled()):
-            # if step == 47223:
-            #     print(
-            #         f"DEBUG: step 47223: x_hat:{x_hat}, lam_hat:{lam_hat}, A_list: {A_list}, b_pad: {b_pad}, c_pad:{c_pad}, b_mask:{b_mask}, c_mask:{c_mask}, m_sizes:{m_sizes}, n_sizes: {n_sizes}, sources: {sources}"
-            #     )
             loss = criterion(
                 x_hat, lam_hat, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes
             )
+
+        # shape invariants
+        assert x_hat.numel() == sum(n_sizes), (x_hat.shape, n_sizes)
+        assert lam_hat.numel() == sum(m_sizes), (lam_hat.shape, m_sizes)
 
         # If anything is non‑finite, dump extra info and skip/update
         if not torch.isfinite(loss):
@@ -251,6 +220,11 @@ def train_epoch(
         prev_scale = scaler.get_scale()
         scaler.step(optimizer)
         scaler.update()
+
+        # Batch-wise schedulers like OneCycleLR must be stepped here:
+        if isinstance(scheduler, OneCycleLR):
+            scheduler.step()
+
         new_scale = scaler.get_scale()
         if new_scale < prev_scale:
             # scaler skipped the step due to inf/nan in grads
@@ -291,6 +265,8 @@ def eval_epoch(
     ) in loader:
         batch_graph = batch_graph.to(device)
         b_pad, c_pad = b_pad.to(device), c_pad.to(device)
+
+        A_list = [A.to(device) if A.device != device else A for A in A_list]
 
         with autocast(enabled=amp):
             x_hat, lam_hat = model(batch_graph)
@@ -519,7 +495,7 @@ def train():
     if args.scheduler == "plateau":
         scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
     elif args.scheduler == "cosine":
-        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs * len(train_loader))
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     elif args.scheduler == "onecycle":
         scheduler = OneCycleLR(
             optimizer,
@@ -539,6 +515,7 @@ def train():
     # Train loop
     global_step = 0
     for epoch in range(1, args.epochs + 1):
+        model.epoch_callback(epoch)
         train_loss, global_step = train_epoch(
             model,
             train_loader,
@@ -549,19 +526,11 @@ def train():
             grad_clip=args.grad_clip,
             start_step=global_step,
             log_every=50,
+            scheduler=scheduler,
         )
-        for epoch in range(1, args.epochs + 1):
-            train_loss = train_epoch(
-                model,
-                train_loader,
-                criterion,
-                optimizer,
-                scaler,
-                device,
-                grad_clip=args.grad_clip,
-            )
 
-        if isinstance(scheduler, OneCycleLR):
+        # Epoch-level schedulers
+        if isinstance(scheduler, CosineAnnealingLR):
             scheduler.step()
 
         val_loss, val_terms = eval_epoch(

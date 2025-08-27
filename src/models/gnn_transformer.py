@@ -122,18 +122,23 @@ class GNNTransformer(BaseModel):
             transformer_out = self.pos_encoder(transformer_out)
         # masked-only encoder
         if self.num_encoder_layers_masked > 0:
-            adj_list = batched_data.adj_list
-            padded_adj_list = torch.zeros(
-                (len(adj_list), max_num_nodes, max_num_nodes), device=h_node.device
-            )
-            for idx, adj_list_item in enumerate(adj_list):
-                N, _ = adj_list_item.shape
-                padded_adj_list[idx, 0:N, 0:N] = torch.from_numpy(adj_list_item)
-            transformer_out = self.masked_transformer_encoder(
-                transformer_out.transpose(0, 1),
-                attn_mask=padded_adj_list,
-                valid_input_mask=src_padding_mask,
-            ).transpose(0, 1)
+            adj_list = getattr(batched_data, "adj_list", None)
+            if adj_list is None:
+                logger.warning(
+                    "num_encoder_layers_masked>0 but no 'adj_list' on batch; skipping masked encoder."
+                )
+            else:
+                padded_adj_list = torch.zeros(
+                    (len(adj_list), max_num_nodes, max_num_nodes), device=h_node.device
+                )
+                for idx, adj_list_item in enumerate(adj_list):
+                    N, _ = adj_list_item.shape
+                    padded_adj_list[idx, 0:N, 0:N] = torch.from_numpy(adj_list_item)
+                transformer_out = self.masked_transformer_encoder(
+                    transformer_out.transpose(0, 1),
+                    attn_mask=padded_adj_list,
+                    valid_input_mask=src_padding_mask,
+                ).transpose(0, 1)
         # vanilla encoder layers
         if self.num_encoder_layers > 0:
             transformer_out, _ = self.transformer_encoder(
@@ -201,15 +206,13 @@ class PositionalEncoding(nn.Module):
 class VarConstHead(nn.Module):
     def __init__(self, in_dim):
         super().__init__()
-        self.to_xhat = nn.Sequential(nn.Linear(in_dim, 1))  # variables
-        self.to_lam = nn.Sequential(nn.Linear(in_dim, 1))  # constraints
+        self.to_xhat = nn.Linear(in_dim, 1)  # x is free (continuous)
+        self.to_lam = nn.Sequential(
+            nn.Linear(in_dim, 1),  # λ ≥ 0 for all ≤ rows
+            nn.Softplus(),
+        )
 
     def forward(self, h, var_mask, constr_mask):
-        """
-        h : (N_total, d)  –‑ node embeddings of the *batch*
-        var_mask, constr_mask come from `batch_graph`
-        (you can store them in data objects when you build them)
-        """
-        x_hat = self.to_xhat(h[var_mask]).squeeze(-1)  # (∑nᵢ,)
-        lam_hat = self.to_lam(h[constr_mask]).squeeze(-1)  # (∑mᵢ,)
+        x_hat = self.to_xhat(h[var_mask]).squeeze(-1)
+        lam_hat = self.to_lam(h[constr_mask]).squeeze(-1)
         return x_hat, lam_hat

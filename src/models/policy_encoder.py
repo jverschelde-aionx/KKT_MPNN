@@ -178,7 +178,7 @@ class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
             torch.nn.Linear(args.embedding_size, args.embedding_size)
         )
         self.feature_module_edge = torch.nn.Sequential(
-            torch.nn.Linear(1, args.embedding_size, bias=False)
+            torch.nn.Linear(args.edge_nfeats, args.embedding_size, bias=False)
         )
         self.feature_module_right = torch.nn.Sequential(
             torch.nn.Linear(args.embedding_size, args.embedding_size, bias=False)
@@ -239,86 +239,50 @@ class GraphDataset(torch_geometric.data.Dataset):
     def len(self):
         return len(self.sample_files)
 
-    def process_sample(self, filepath):
-        # Handle single BG file path (no solution file needed for KKT training)
-        BGFilepath = filepath
-        with open(BGFilepath, "rb") as f:
-            bgData = pickle.load(f)
+    def process_sample(self, filepath: str):
+        with open(filepath, "rb") as f:
+            BG = pickle.load(f)
+        if not (isinstance(BG, tuple) and len(BG) == 7):
+            raise RuntimeError(
+                f"{filepath} is not in the correct format. Expected 7‑tuple (A, v_map, v_nodes, c_nodes, b_vars, b_vec, c_vec)."
+            )
+        return BG
 
-        BG = bgData
-        A, v_map, v_nodes, c_nodes, b_vars = BG
-
-        # Extract variable names from the BG data structure
-        varNames = list(v_map.keys())
-
-        n_vars = len(v_nodes)
-        sols = np.zeros((1, n_vars))  # Single dummy solution
-        objs = np.array([0.0])  # Single dummy objective
-
-        return BG, sols, objs, varNames
-
-    def get(self, index):
-        """
-        This method loads a node bipartite graph observation as saved on the disk during data collection.
-        """
-
-        # nbp, sols, objs, varInds, varNames = self.process_sample(self.sample_files[index])
-        BG, sols, objs, varNames = self.process_sample(self.sample_files[index])
-
-        A, v_map, v_nodes, c_nodes, b_vars = BG
-
-        constraint_features = c_nodes
-        edge_indices = A._indices()
-
-        variable_features = v_nodes
-        edge_features = A._values().unsqueeze(1)
-
-        constraint_features = torch.as_tensor(constraint_features, dtype=torch.float32)
-        variable_features = torch.as_tensor(variable_features, dtype=torch.float32)
-        edge_features = torch.as_tensor(edge_features, dtype=torch.float32)
-
-        # Replace NaN / ±Inf with finite values
-        constraint_features = torch.nan_to_num(
-            constraint_features, nan=0.0, posinf=1e6, neginf=-1e6
+    def get(self, index: int):
+        A, v_map, v_nodes, c_nodes, b_vars, b_vec, c_vec = self.process_sample(
+            self.sample_files[index]
         )
+
+        edge_indices = A._indices()
+        edge_features = A._values().unsqueeze(1)  # real coefficients
+
+        variable_features = torch.as_tensor(v_nodes, dtype=torch.float32)
+        constraint_features = torch.as_tensor(c_nodes, dtype=torch.float32)
+        b_vec = torch.as_tensor(b_vec, dtype=torch.float32)
+        c_vec = torch.as_tensor(c_vec, dtype=torch.float32)
+
+        # Sanitize
         variable_features = torch.nan_to_num(
             variable_features, nan=0.0, posinf=1e6, neginf=-1e6
+        )
+        constraint_features = torch.nan_to_num(
+            constraint_features, nan=0.0, posinf=1e6, neginf=-1e6
         )
         edge_features = torch.nan_to_num(
             edge_features, nan=0.0, posinf=1e6, neginf=-1e6
         )
 
         graph = BipartiteNodeData(
-            torch.FloatTensor(constraint_features),
-            torch.LongTensor(edge_indices),
-            torch.FloatTensor(edge_features),
-            torch.FloatTensor(variable_features),
+            constraint_features=constraint_features,
+            edge_indices=torch.LongTensor(edge_indices),
+            edge_features=edge_features,
+            variable_features=variable_features,
         )
+        graph.num_nodes = constraint_features.size(0) + variable_features.size(0)
 
-        # We must tell pytorch geometric how many nodes there are, for indexing purposes
-        graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
-        graph.solutions = torch.FloatTensor(sols).reshape(-1)
-
-        graph.objVals = torch.FloatTensor(objs)
-        graph.nsols = sols.shape[0]
-        graph.ntvars = variable_features.shape[0]
-        graph.varNames = varNames
-        graph.sample_idx = index
+        graph.b_vec = b_vec
+        graph.c_vec = c_vec
         graph.sample_path = self.sample_files[index]
-
-        varname_dict = {}
-        varname_map = []
-        i = 0
-        for iter in varNames:
-            varname_dict[iter] = i
-            i += 1
-        for iter in v_map:
-            varname_map.append(varname_dict[iter])
-
-        varname_map = torch.tensor(varname_map)
-
-        graph.varInds = [[varname_map], [b_vars]]
-
         return graph
 
 
@@ -412,48 +376,35 @@ def _right_pad(x: torch.Tensor, target: int) -> torch.Tensor:
     # Pads the last dim of `x` with zeros on the right up to `target`.
     if x.size(1) == target:
         return x
-    pad_width: int = target - x.size(1)
-    pad: torch.Tensor = torch.zeros(
-        x.size(0), pad_width, dtype=x.dtype, device=x.device
-    )
+    pad_w = target - x.size(1)
+    pad = x.new_zeros((x.size(0), pad_w))
     return torch.cat([x, pad], dim=1)
 
 
 def collate(
     batch: List["BipartiteNodeData"],
 ) -> Tuple[
-    torch_geometric.data.Batch,  # batch_graph
-    List[torch.Tensor],  # A_list (sparse)
+    torch_geometric.data.Batch,
+    List[torch.Tensor],
     torch.Tensor,
-    torch.Tensor,  # b_pad , c_pad
     torch.Tensor,
-    torch.Tensor,  # b_mask, c_mask
+    torch.Tensor,
+    torch.Tensor,
     List[int],
-    List[int],  # m_sizes, n_sizes
+    List[int],
+    List[str],
 ]:
     graphs: List["BipartiteNodeData"] = []
-    A_list: List[torch.Tensor] = []
-    b_list: List[torch.Tensor] = []
-    c_list: List[torch.Tensor] = []
-    m_sizes: List[int] = []
-    n_sizes: List[int] = []
+    A_list, b_list, c_list = [], [], []
+    m_sizes, n_sizes, sources = [], [], []
 
     for data in batch:
-        assert torch.isfinite(data.variable_features).all(), (
-            "NaN/Inf in variable_features"
-        )
-        assert torch.isfinite(data.edge_attr).all(), "NaN/Inf in edge values"
-
-        # ----- enforce fixed feature width ---------------------------
+        # Encoder padding
         data.constraint_features = _right_pad(data.constraint_features, _CONS_PAD)
         data.variable_features = _right_pad(data.variable_features, _VAR_PAD)
 
-        graphs.append(data)
-
-        m: int = data.constraint_features.size(0)
-        n: int = data.variable_features.size(0)
-        m_sizes.append(m)
-        n_sizes.append(n)
+        m = int(data.b_vec.numel())
+        n = int(data.c_vec.numel())
 
         rows, cols = data.edge_index
         A_sparse = torch.sparse_coo_tensor(
@@ -461,40 +412,29 @@ def collate(
             values=data.edge_attr.squeeze(-1),
             size=(m, n),
         ).coalesce()
+        assert A_sparse.size(0) == m and A_sparse.size(1) == n
+
+        graphs.append(data)
         A_list.append(A_sparse)
+        b_list.append(data.b_vec)
+        c_list.append(data.c_vec)
+        m_sizes.append(m)
+        n_sizes.append(n)
+        sources.append(getattr(data, "sample_path", "<unknown>"))
 
-        b_list.append(data.constraint_features[:, 0])  # any column is fine
-        c_list.append(data.variable_features[:, 0])
+    B = len(batch)
+    max_m, max_n = max(m_sizes), max(n_sizes)
+    b_pad = torch.zeros(B, max_m, dtype=torch.float32)
+    b_mask = torch.zeros(B, max_m, dtype=torch.bool)
+    c_pad = torch.zeros(B, max_n, dtype=torch.float32)
+    c_mask = torch.zeros(B, max_n, dtype=torch.bool)
 
-    B: int = len(batch)
-    max_m: int = max(m_sizes)
-    max_n: int = max(n_sizes)
-
-    b_pad: torch.Tensor = torch.zeros(B, max_m)
-    b_mask: torch.Tensor = torch.zeros(B, max_m, dtype=torch.bool)
     for i, (b, m) in enumerate(zip(b_list, m_sizes)):
         b_pad[i, :m] = b
         b_mask[i, :m] = True
-
-    c_pad: torch.Tensor = torch.zeros(B, max_n)
-    c_mask: torch.Tensor = torch.zeros(B, max_n, dtype=torch.bool)
     for i, (c, n) in enumerate(zip(c_list, n_sizes)):
         c_pad[i, :n] = c
         c_mask[i, :n] = True
 
-    batch_graph: torch_geometric.data.Batch = torch_geometric.data.Batch.from_data_list(
-        graphs
-    )
-    sources = [data.sample_path for data in batch]
-
-    return (
-        batch_graph,
-        A_list,
-        b_pad,
-        c_pad,
-        b_mask,
-        c_mask,
-        m_sizes,
-        n_sizes,
-        sources,
-    )
+    batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
+    return batch_graph, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes, sources
