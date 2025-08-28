@@ -160,7 +160,12 @@ def solve_instance(
     m.Params.PoolSearchMode = settings.gurobi_pool_mode
     m.Params.TimeLimit = settings.gurobi_max_time
     m.Params.LogFile = str(log_dir / (lp_path.name + ".log"))
-    m.optimize()
+    try:
+        m.optimize()
+    except gp.GurobiError as e:
+        logger.error("Gurobi failed on {}: {}", lp_path, e)
+        m.dispose()
+        return
 
     sols, objs = [], []
     var_names = [v.VarName for v in m.getVars()]
@@ -223,7 +228,11 @@ def generate_instances(settings: Settings) -> None:
                     d.mkdir(parents=True, exist_ok=True)
 
                 solution_path = sol_dir / (lp_path.name + ".sol")
-                if settings.solve and not solution_path.exists():
+                if (
+                    settings.solve
+                    and not solution_path.exists()
+                    and split in ["val", "test"]
+                ):
                     solve_instance(settings, lp_path, solution_path, log_dir)
 
                 bg_path = bg_dir / (lp_path.name + ".bg")
