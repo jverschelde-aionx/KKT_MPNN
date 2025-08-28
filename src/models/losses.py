@@ -234,7 +234,6 @@ class KKTLossGraph(nn.Module):
 
     def __init__(
         self,
-        *,
         w_primal: float = 0.1,
         w_dual: float = 0.1,
         w_stat: float = 0.6,
@@ -267,6 +266,9 @@ class KKTLossGraph(nn.Module):
         # Basic shape invariants
         assert x_hat.numel() == sum_n, f"x_hat {x_hat.numel()} vs Σn {sum_n}"
         assert lam_hat.numel() == sum_m, f"lam_hat {lam_hat.numel()} vs Σm {sum_m}"
+        # Numeric guard rails
+        x_hat = torch.nan_to_num(x_hat, nan=0.0, posinf=1e6, neginf=-1e6)
+        lam_hat = torch.nan_to_num(lam_hat, nan=0.0, posinf=1e6, neginf=-1e6)
 
         # Flatten true b and c in the SAME per-graph order as edge_index uses
         b_cat = b_pad[b_mask].to(device=device, dtype=torch.float32)  # (Σ m_i,)

@@ -6,7 +6,7 @@ data:
   val_split: 0.15
   n_instances: 10000
   data_root: ../data
-  solve: false
+  solve: true
   gurobi_threads: 4
   n_jobs: 32
   # Additional data parameters from graphtrans
@@ -54,9 +54,9 @@ training:
   eval_batch_size: 4
   epochs: 50
   num_workers: 0
-  lr: 0.001
+  lr: 0.0001
   weight_decay: 0.0
-  loss: kkt
+  loss: kkt-graph
   scheduler: none
   pct_start: 0.3
   grad_clip: 1.0

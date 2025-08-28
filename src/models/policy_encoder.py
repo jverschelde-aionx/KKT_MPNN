@@ -262,6 +262,11 @@ class GraphDataset(torch_geometric.data.Dataset):
         c_vec = torch.as_tensor(c_vec, dtype=torch.float32)
 
         # Sanitize
+        # Guard against NaN/Inf in right-hand side and costs
+
+        b_vec = torch.nan_to_num(b_vec, nan=0.0, posinf=1e6, neginf=-1e6)
+        c_vec = torch.nan_to_num(c_vec, nan=0.0, posinf=1e6, neginf=-1e6)
+
         variable_features = torch.nan_to_num(
             variable_features, nan=0.0, posinf=1e6, neginf=-1e6
         )
@@ -437,4 +442,36 @@ def collate(
         c_mask[i, :n] = True
 
     batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
+    return batch_graph, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes, sources
+
+
+def collate_graph_only(batch):
+    # same as default collate, but does NOT build A_sparse/A_list
+    # return an empty list for A_list to keep unpacking compatible
+    graphs, b_list, c_list, m_sizes, n_sizes, sources = [], [], [], [], [], []
+    for data in batch:
+        data.constraint_features = _right_pad(data.constraint_features, _CONS_PAD)
+        data.variable_features = _right_pad(data.variable_features, _VAR_PAD)
+        graphs.append(data)
+        b_list.append(data.b_vec)
+        c_list.append(data.c_vec)
+        m_sizes.append(int(data.b_vec.numel()))
+        n_sizes.append(int(data.c_vec.numel()))
+        sources.append(getattr(data, "sample_path", "<unknown>"))
+
+    B = len(batch)
+    max_m, max_n = max(m_sizes), max(n_sizes)
+    b_pad = torch.zeros(B, max_m)
+    b_mask = torch.zeros(B, max_m, dtype=torch.bool)
+    c_pad = torch.zeros(B, max_n)
+    c_mask = torch.zeros(B, max_n, dtype=torch.bool)
+    for i, (b, m) in enumerate(zip(b_list, m_sizes)):
+        b_pad[i, :m] = b
+        b_mask[i, :m] = True
+    for i, (c, n) in enumerate(zip(c_list, n_sizes)):
+        c_pad[i, :n] = c
+        c_mask[i, :n] = True
+
+    batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
+    A_list = []  # placeholder
     return batch_graph, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes, sources
