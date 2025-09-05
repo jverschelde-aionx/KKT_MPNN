@@ -1,13 +1,12 @@
 import pickle
 from typing import List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch_geometric
 from rtdl_num_embeddings import PeriodicEmbeddings, PiecewiseLinearEmbeddings
 
 _CONS_PAD: int = 4  # global max constraint feature width
-_VAR_PAD: int = 26  # global max variable   feature width
+_VAR_PAD: int = 18  # global max variable   feature width
 
 
 class GNNPolicy(torch.nn.Module):
@@ -80,8 +79,20 @@ class GNNPolicy(torch.nn.Module):
             torch.nn.ReLU(),
         )
 
-        # Edge embedding
-        self.edge_embedding = torch.nn.LayerNorm(args.edge_nfeats)
+        # Edge embedding (A_ij coefficients)
+        self.edge_num_emb, edge_out_dim = self._build_numeric_block(
+            in_feats=args.edge_nfeats,
+            emb_type=args.num_emb_type,
+            n_freq=args.num_emb_freqs,
+            n_bins=args.num_emb_bins,
+        )
+        self.edge_proj = torch.nn.Sequential(
+            torch.nn.LayerNorm(edge_out_dim),
+            torch.nn.Linear(edge_out_dim, d_out),
+            torch.nn.ReLU(),
+            torch.nn.Linear(d_out, d_out),
+            torch.nn.ReLU(),
+        )
 
         # Message‑passing layers
         self.conv_v_to_c = BipartiteGraphConvolution(args)
@@ -109,7 +120,7 @@ class GNNPolicy(torch.nn.Module):
         c = self.cons_proj(self.cons_num_emb(constraint_features))
 
         v = self.var_proj(self.var_num_emb(variable_features))
-        e = self.edge_embedding(edge_features)
+        e = self.edge_proj(self.edge_num_emb(edge_features))
 
         # two rounds of bipartite convolution
         c = self.conv_v_to_c(v, rev_idx, e, c)
@@ -178,7 +189,7 @@ class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
             torch.nn.Linear(args.embedding_size, args.embedding_size)
         )
         self.feature_module_edge = torch.nn.Sequential(
-            torch.nn.Linear(args.edge_nfeats, args.embedding_size, bias=False)
+            torch.nn.Linear(args.embedding_size, args.embedding_size, bias=False)
         )
         self.feature_module_right = torch.nn.Sequential(
             torch.nn.Linear(args.embedding_size, args.embedding_size, bias=False)
@@ -261,22 +272,6 @@ class GraphDataset(torch_geometric.data.Dataset):
         b_vec = torch.as_tensor(b_vec, dtype=torch.float32)
         c_vec = torch.as_tensor(c_vec, dtype=torch.float32)
 
-        # Sanitize
-        # Guard against NaN/Inf in right-hand side and costs
-
-        b_vec = torch.nan_to_num(b_vec, nan=0.0, posinf=1e6, neginf=-1e6)
-        c_vec = torch.nan_to_num(c_vec, nan=0.0, posinf=1e6, neginf=-1e6)
-
-        variable_features = torch.nan_to_num(
-            variable_features, nan=0.0, posinf=1e6, neginf=-1e6
-        )
-        constraint_features = torch.nan_to_num(
-            constraint_features, nan=0.0, posinf=1e6, neginf=-1e6
-        )
-        edge_features = torch.nan_to_num(
-            edge_features, nan=0.0, posinf=1e6, neginf=-1e6
-        )
-
         graph = BipartiteNodeData(
             constraint_features=constraint_features,
             edge_indices=torch.LongTensor(edge_indices),
@@ -341,6 +336,19 @@ class BipartiteNodeData(torch_geometric.data.Data):
         else:
             return super().__inc__(key, value, *args, **kwargs)
 
+    def __str__(self):
+        return (
+            f"BipartiteNodeData(num_constraint_nodes={self.constraint_features.size(0)}, "
+            f"num_variable_nodes={self.variable_features.size(0)}, "
+            f"num_edges={self.edge_index.size(1)}, "
+            f"constraint_features={self.constraint_features}, "
+            f"variable_features={self.variable_features}, "
+            f"edge_index={self.edge_index}, "
+            f"edge_attr={self.edge_attr}, "
+            f"is_var_node={self.is_var_node}, "
+            f"is_constr_node={self.is_constr_node})"
+        )
+
 
 # custom class that wraps the GNNPolicy to be used as an encoder that can be used in a GraphTrans model.
 class PolicyEncoder(torch.nn.Module):
@@ -363,7 +371,7 @@ class PolicyEncoder(torch.nn.Module):
         # identical to first part of original GNNPolicy.forward
         rev_idx = torch.stack([e_idx[1], e_idx[0]], dim=0)
         c = self.base.cons_proj(self.base.cons_num_emb(c))
-        e = self.base.edge_embedding(e_attr)
+        e = self.base.edge_proj(self.base.edge_num_emb(data.edge_attr))
         v = self.base.var_proj(self.base.var_num_emb(v))
 
         c = self.base.conv_v_to_c(v, rev_idx, e, c)

@@ -3,7 +3,7 @@ import multiprocessing as mp
 import pickle
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import gurobipy as gp
 import numpy as np
@@ -13,91 +13,35 @@ import tqdm
 from ecole.instance import CombinatorialAuctionGenerator, IndependentSetGenerator
 from loguru import logger
 
-from instances.common import COMBINATORIAL_AUCTION, INDEPENDANT_SET, Settings
+from instances.common import (
+    ConstraintFeature,
+    EdgeFeature,
+    ProblemClass,
+    Settings,
+    VariableFeature,
+)
 from instances.utils import ensure_dirs
 
 
-def _detect_obj_sense(model: scp.Model, lp_path: Path) -> str:
-    """Return 'min' or 'max'."""
-    # 1) Try PySCIPOpt API (version-dependent)
-    for attr in ("getObjectiveSense", "getObjSense", "getObjsense", "getObjSense"):
-        if hasattr(model, attr):
-            try:
-                sense = getattr(model, attr)()
-                # handle strings/enums
-                if isinstance(sense, str):
-                    s = sense.lower()
-                    if s.startswith("max"):
-                        return "max"
-                    if s.startswith("min"):
-                        return "min"
-                else:
-                    # Fallback for enum-like returns (SCIP_OBJSENSE.MAXIMIZE/MINIMIZE)
-                    # Compare string name if available
-                    s = str(sense).lower()
-                    if "max" in s:
-                        return "max"
-                    if "min" in s:
-                        return "min"
-            except Exception:
-                pass
-    # 2) Fallback: scan LP header
-    try:
-        with open(lp_path, "r", errors="ignore") as f:
-            for line in f:
-                s = line.strip().lower()
-                if s.startswith("maximize") or s.startswith("maximise"):
-                    return "max"
-                if s.startswith("minimize") or s.startswith("minimise"):
-                    return "min"
-    except Exception:
-        pass
-    raise ValueError(f"Could not detect objective sense in lp file: {lp_path}")
+# instance-wise min–max normalization for features
+def _minmax_normalization(x: torch.Tensor) -> torch.Tensor:
+    if x.numel() == 0:
+        return x
+    mn = x.min(dim=0).values
+    mx = x.max(dim=0).values
+    return (x - mn) / (mx - mn + 1e-9)
 
 
-def _finite_lb(lb: float) -> bool:
-    return lb > -1e20
-
-
-def _finite_ub(ub: float) -> bool:
-    return ub < 1e20
-
-
-def _get_bounds(model: scp.Model, var: scp.Variable) -> Tuple[float, float]:
-    """Best-effort: global bounds if available, else local, else +/-inf."""
-    # Try several APIs to be robust across PySCIPOpt versions
-    for fn in ("getVarLbGlobal", "getVarLb", "getVarLowerBound"):
-        if hasattr(model, fn):
-            try:
-                lb = float(getattr(model, fn)(var))
-                break
-            except Exception:
-                lb = -math.inf
-    else:
-        try:
-            lb = float(var.getLb())  # may exist in some versions
-        except Exception:
-            lb = -math.inf
-
-    for fn in ("getVarUbGlobal", "getVarUb", "getVarUpperBound"):
-        if hasattr(model, fn):
-            try:
-                ub = float(getattr(model, fn)(var))
-                break
-            except Exception:
-                ub = math.inf
-    else:
-        try:
-            ub = float(var.getUb())
-        except Exception:
-            ub = math.inf
-
-    # Normalize extreme infinities to large sentinels
-    if not np.isfinite(lb):
-        lb = -1e50
-    if not np.isfinite(ub):
-        ub = 1e50
-    return lb, ub
+# helper to encode constraint sense
+def _constraint_sense_code(problem, constraint) -> Tuple[int, float]:
+    rhs = float(problem.getRhs(constraint))
+    lhs = float(problem.getLhs(constraint))
+    if abs(rhs - lhs) < 1e-12:
+        return 2, rhs  # equality
+    if rhs < 1e20:
+        return 0, rhs  # <=
+    # else treat as >= with lhs finite
+    return 1, lhs  # >=
 
 
 def generate_IS_instances(
@@ -106,11 +50,13 @@ def generate_IS_instances(
     """Generate Independent Set instances."""
 
     for size in settings.is_sizes:
-        inst_dir, _ = ensure_dirs(settings.data_root, INDEPENDANT_SET, size, split)
+        inst_dir, _ = ensure_dirs(
+            settings.data_root, ProblemClass.INDEPENDANT_SET, size, split
+        )
         for i in tqdm.trange(
             n_instances, desc=f"Generating {size} Independent Set instances"
         ):
-            name = f"{INDEPENDANT_SET}-{size}-{i:04}.lp"
+            name = f"{ProblemClass.INDEPENDANT_SET}-{size}-{i:04}.lp"
             lp_path = inst_dir / name
             if lp_path.exists():
                 lp_paths.append(lp_path)
@@ -131,12 +77,12 @@ def generate_CA_instances(
     """Generate Combinatorial Auction instances."""
     for size in settings.ca_sizes:
         inst_dir, _ = ensure_dirs(
-            settings.data_root, COMBINATORIAL_AUCTION, size, split
+            settings.data_root, ProblemClass.COMBINATORIAL_AUCTION, size, split
         )
         for i in tqdm.trange(
             n_instances, desc=f"Generating {size} Combinatorial Auction instances"
         ):
-            name = f"{COMBINATORIAL_AUCTION}-{size}-{i:04}.lp"
+            name = f"{ProblemClass.COMBINATORIAL_AUCTION}-{size}-{i:04}.lp"
             lp_path = inst_dir / name
             if lp_path.exists():
                 lp_paths.append(lp_path)
@@ -200,9 +146,9 @@ def generate_instances(settings: Settings) -> None:
             lp_paths: List[Path] = []
 
             # generate the .lp files for this split only
-            if problem == INDEPENDANT_SET:
+            if problem == ProblemClass.INDEPENDANT_SET:
                 generate_IS_instances(settings, split, n_instances, lp_paths)
-            elif problem == COMBINATORIAL_AUCTION:
+            elif problem == ProblemClass.COMBINATORIAL_AUCTION:
                 generate_CA_instances(settings, split, n_instances, lp_paths)
             else:
                 raise ValueError(f"Unknown problem type: {problem}")
@@ -238,7 +184,11 @@ def generate_instances(settings: Settings) -> None:
                 bg_path = bg_dir / (lp_path.name + ".bg")
                 if not bg_path.exists():
                     try:
-                        graph_data = get_bipartite_graph(lp_path)
+                        graph_data = get_bipartite_graph(
+                            lp_path,
+                            settings.add_positional_features,
+                            settings.normalize_positional_features,
+                        )
                     except Exception as e:
                         logger.error("Failed on {} – {}", lp_path, e)
                         continue
@@ -253,166 +203,299 @@ def generate_instances(settings: Settings) -> None:
         )
 
 
-def position_get_ordered_flt(variable_features: torch.Tensor) -> torch.Tensor:
-    """Encode relative variable order as a 20‑bit binary fraction."""
-    length = variable_features.shape[0]
-    feat_w = 20
-    sorter = variable_features[:, 1]
-    position = torch.argsort(sorter).float() / float(length)
+def rank_variables_by_features(
+    v_feats: torch.Tensor,
+    cols: Sequence[int] = (0, 1, 2, 3, 4, 5),
+    descending: bool = True,
+) -> torch.Tensor:
+    """
+    Stable lexicographic ranks from multiple feature columns.
+    Returns ranks[j] ∈ {0..n-1} (0 = top).
+    """
+    n = v_feats.size(0)
+    order = torch.arange(n, device=v_feats.device)
+    for col in reversed(cols):  # least -> most important
+        vals = v_feats[:, col]
+        idx = torch.argsort(vals[order], descending=descending, stable=True)
+        order = order[idx]
+    ranks = torch.empty_like(order)
+    ranks[order] = torch.arange(n, device=v_feats.device)
+    return ranks
 
-    pos_feat = torch.zeros(length, feat_w)
-    for row in range(length):
-        flt = position[row].item()
-        divider = 0.5
+
+def encode_ranks_as_bits(
+    v_feats: torch.Tensor, ranks: torch.Tensor, feat_w: int = 20
+) -> torch.Tensor:
+    """
+    Append 'feat_w' binary-fraction bits that encode the quantile of each rank.
+    """
+    n = v_feats.size(0)
+    dev, dtype = v_feats.device, v_feats.dtype
+    denom = float(max(n, 1))  # -> [0,1)
+    q = ranks.to(torch.float32) / denom
+
+    pos_bits = torch.zeros((n, feat_w), dtype=dtype, device=dev)
+    for i in range(n):
+        frac = float(q[i].item())
+        div = 0.5
         for k in range(feat_w):
-            if flt >= divider:
-                pos_feat[row, k] = 1.0
-                flt -= divider
-        divider *= 0.5
-    return torch.cat([variable_features, pos_feat], dim=1)
+            if frac >= div:
+                pos_bits[i, k] = 1.0
+                frac -= div
+            div *= 0.5
+    return torch.cat([v_feats, pos_bits], dim=1)
 
 
-def get_bipartite_graph(lp_path: Path):
-    """
-    Parse an LP and return a 7‑tuple:
-      (A, v_map, v_nodes, c_nodes, b_vars, b_vec, c_vec)
+def get_bipartite_graph(
+    lp_path: Path, add_pos_feat: bool = True, normalize_pos_feat: bool = False
+) -> Tuple:
+    # load model
+    problem = scp.Model()
+    problem.hideOutput(True)
+    problem.readProblem(str(lp_path))
 
-    - A: sparse_coo (m, n) with REAL coefficients
-    - v_nodes: (n, 6) encoder features ∈ [0,1] (not used by KKT math)
-    - c_nodes: (m, 4) encoder features ∈ [0,1]
-               [avg_coef_per_row, degree, rhs, is_bound]
-    - b_vars: indices of binary vars (for reference)
-    - b_vec: (m,) RHS for Ax ≤ b
-    - c_vec: (n,) objective for MINIMIZATION (we flip if original LP is 'maximize')
-    """
-    m = scp.Model()
-    m.hideOutput(True)
-    m.readProblem(lp_path)
+    # variables
+    scip_variables = problem.getVars()
+    scip_variables.sort(key=lambda v: v.name)
+    n_variables = len(scip_variables)
+    v_map: Dict[str, int] = {v.name: i for i, v in enumerate(scip_variables)}
 
-    # ----- variables --------------------------------------------------------
-    mvars = m.getVars()
-    mvars.sort(key=lambda v: v.name)
-    nvars = len(mvars)
-    v_map: Dict[scp.Variable, int] = {v: i for i, v in enumerate(mvars)}
-
-    ORI_FEATS = 6  # [obj_coef, avg_coef, degree, max_coef, min_coef, is_binary]
-    v_nodes = np.zeros((nvars, ORI_FEATS), dtype=np.float32)
-    b_vars: List[int] = []
-    for i, v in enumerate(mvars):
+    # base variable features + 12-bit positional embedding
+    N_FEATURES = 6
+    v_feats = np.zeros((n_variables, N_FEATURES), dtype=np.float32)
+    # init sentinels for min/max
+    v_feats[:, VariableFeature.MAX_COEF] = -np.inf  # max_coef
+    v_feats[:, VariableFeature.MIN_COEF] = np.inf  # min_coef
+    b_idx: List[int] = []
+    # binary flags
+    for constraint_idx, var in enumerate(scip_variables):
+        vtype = getattr(var, "vtype", None)
         try:
-            vtype = v.vtype() if hasattr(v, "vtype") else v.getVType()
-            if str(vtype).upper().startswith("BINARY") or str(vtype).upper() == "B":
-                v_nodes[i, 5] = 1.0
-                b_vars.append(i)
+            vtype = vtype() if callable(vtype) else var.getVType()
         except Exception:
-            pass  # Non-MIP LPs may not expose a vtype API; ignore
+            pass
+        s = str(vtype).upper()
+        if s.startswith("B") or s.startswith("BIN"):
+            v_feats[constraint_idx, VariableFeature.IS_INTEGER] = 1.0
+            b_idx.append(constraint_idx)
 
-    # ----- objective (detect sense, flip to min if needed) ------------------
-    obj = m.getObjective()
-    c_raw = np.zeros(nvars, dtype=np.float32)
+    # objective (flip to min if needed)
+    c_raw = np.zeros(n_variables, dtype=np.float32)
+    obj = problem.getObjective()
     for term in obj:
         var = term.vartuple[0]
-        j = v_map[var]
+        variable_idx = v_map[var.name]
         coef = float(obj[term])
-        c_raw[j] += coef
-        v_nodes[j, 0] = coef  # keep raw objective coef as a feature
+        c_raw[variable_idx] += coef
+        v_feats[variable_idx, VariableFeature.OBJ_COEF] = (
+            coef  # raw obj coef as feature
+        )
 
-    sense = _detect_obj_sense(m, lp_path)  # 'min' or 'max'
-    c_vec = torch.tensor(c_raw if sense == "min" else -c_raw, dtype=torch.float32)
+    # detect sense
+    try:
+        sense_min = problem.getObjectiveSense().lower().startswith("min")
+    except Exception:
+        sense_min = True
+    c_vec = torch.tensor(c_raw if sense_min else -c_raw, dtype=torch.float32)
 
-    # ----- constraints -> Ax ≤ b (also add bounds as rows) ------------------
-    conss = [c for c in m.getConss() if len(m.getValsLinear(c)) > 0]
+    # original constraints
+    conss_all = [c for c in problem.getConss() if len(problem.getValsLinear(c)) > 0]
+    # stable order: by nnz then name
+    conss_all.sort(key=lambda c: (len(problem.getValsLinear(c)), str(c)))
+    m_orig = len(conss_all)
 
+    # edge_index/attr and constraint features
+    gi_rows: List[int] = []
+    gi_cols: List[int] = []
+    edge_attr_vals: List[float] = []
+    c_rows_feats: List[List[float]] = []  # [avg_row_coef, degree, rhs, sense_code]
+    graph_rhs: List[float] = []
+    graph_sense: List[int] = []
+
+    for constraint_idx, constraint in enumerate(conss_all):
+        coeffs = problem.getValsLinear(constraint)  # dict[var] -> coef
+        sense_code, rhs_or_lhs = _constraint_sense_code(problem, constraint)
+        deg = 0
+        ssum = 0.0
+        for var_obj, coef in coeffs.items():
+            coef = float(coef)
+            if coef == 0.0:
+                continue
+            variable_idx = v_map[var_obj]
+            gi_rows.append(constraint_idx)
+            gi_cols.append(variable_idx)
+            edge_attr_vals.append(coef)  # TRUE coefficient on the edge
+            deg += 1
+            ssum += coef
+            # update variable-side statistics
+            v_feats[variable_idx, VariableFeature.DEGREE] += 1.0  # degree
+            v_feats[variable_idx, VariableFeature.AVG_COEF] += (
+                coef  # sum of coefs (avg later)
+            )
+            v_feats[variable_idx, VariableFeature.MAX_COEF] = max(
+                v_feats[variable_idx, VariableFeature.MAX_COEF], coef
+            )
+            v_feats[variable_idx, VariableFeature.MIN_COEF] = min(
+                v_feats[variable_idx, VariableFeature.MIN_COEF], coef
+            )
+        avg_row = ssum / max(deg, 1)
+        c_rows_feats.append([avg_row, float(deg), float(rhs_or_lhs), float(sense_code)])
+        graph_rhs.append(float(rhs_or_lhs))
+        graph_sense.append(int(sense_code))
+
+    # Build paper-view tensors
+    if gi_rows:
+        edge_index = torch.tensor([gi_rows, gi_cols], dtype=torch.long)
+        edge_attr = torch.tensor(edge_attr_vals, dtype=torch.float32).unsqueeze(1)
+        # binary incidence adjacency
+        incidence = torch.sparse_coo_tensor(
+            indices=edge_index,
+            values=torch.ones(len(edge_attr_vals), dtype=torch.float32),
+            size=(m_orig, n_variables),
+        ).coalesce()
+    else:
+        edge_index = torch.zeros(2, 0, dtype=torch.long)
+        edge_attr = torch.zeros(0, 1, dtype=torch.float32)
+        incidence = torch.sparse_coo_tensor(
+            torch.zeros(2, 0, dtype=torch.long),
+            torch.zeros(0, dtype=torch.float32),
+            size=(m_orig, n_variables),
+        ).coalesce()
+
+    c_nodes = (
+        torch.tensor(c_rows_feats, dtype=torch.float32)
+        if c_rows_feats
+        else torch.zeros((0, 4), dtype=torch.float32)
+    )
+    graph_b = (
+        torch.tensor(graph_rhs, dtype=torch.float32)
+        if graph_rhs
+        else torch.zeros((0,), dtype=torch.float32)
+    )
+    graph_s = (
+        torch.tensor(graph_sense, dtype=torch.int32)
+        if graph_sense
+        else torch.zeros((0,), dtype=torch.int32)
+    )
+
+    # finalize variable avg coef = sum/degree
+    v_nodes = torch.tensor(v_feats, dtype=torch.float32)
+    deg = v_nodes[:, VariableFeature.DEGREE].clamp(min=1.0)
+    v_nodes[:, 1] = v_nodes[:, 1] / deg
+    # clean infs for vars with zero degree
+    v_nodes[:, VariableFeature.MAX_COEF] = torch.where(
+        torch.isfinite(v_nodes[:, VariableFeature.MAX_COEF]),
+        v_nodes[:, VariableFeature.MAX_COEF],
+        torch.zeros_like(v_nodes[:, VariableFeature.MAX_COEF]),
+    )
+    v_nodes[:, VariableFeature.MIN_COEF] = torch.where(
+        torch.isfinite(v_nodes[:, VariableFeature.MIN_COEF]),
+        v_nodes[:, VariableFeature.MIN_COEF],
+        torch.zeros_like(v_nodes[:, VariableFeature.MIN_COEF]),
+    )
+
+    if add_pos_feat:
+        ranks = rank_variables_by_features(
+            v_nodes,
+            cols=(
+                VariableFeature.OBJ_COEF,
+                VariableFeature.AVG_COEF,
+                VariableFeature.DEGREE,
+                VariableFeature.MAX_COEF,
+                VariableFeature.MIN_COEF,
+                VariableFeature.IS_INTEGER,
+            ),
+            descending=True,
+        )
+        pos_bits = encode_ranks_as_bits(v_nodes, ranks, feat_w=12)[:, -12:]
+        v_nodes = torch.cat([v_nodes, pos_bits], dim=1)
+
+    # Add original coefficients needed for KKT loss calculation (<= rows incl. senses & bounds)
     ind_rows: List[int] = []
     ind_cols: List[int] = []
     vals: List[float] = []
-    b_vec_list: List[float] = []
-    c_feat_rows: List[List[float]] = []  # [avg_coef, degree, rhs, is_bound]
+    b_leq: List[float] = []
 
-    def add_leq_row(coeffs_dict, rhs_val, is_bound: float):
-        row_idx = len(b_vec_list)
-        deg = 0
-        coef_sum = 0.0
+    def _add_leq_row(coeffs_dict, rhs_val: float):
+        row = len(b_leq)
         for var_obj, coef in coeffs_dict.items():
             j = v_map[var_obj]
-            coef = float(coef)
-            if coef != 0.0:
-                ind_rows.append(row_idx)
+            cval = float(coef)
+            if cval != 0.0:
+                ind_rows.append(row)
                 ind_cols.append(j)
-                vals.append(coef)
-                deg += 1
-                coef_sum += coef
-                # per-variable stats for encoder
-                v_nodes[j, 2] += 1.0  # degree
-                v_nodes[j, 1] += coef  # sum of coefs (avg later)
-                v_nodes[j, 3] = max(v_nodes[j, 3], coef)
-                # initialize min with large pos first time
-                v_nodes[j, 4] = (
-                    coef if v_nodes[j, 4] == 0.0 else min(v_nodes[j, 4], coef)
-                )
-        b_vec_list.append(float(rhs_val))
-        avg = coef_sum / max(deg, 1)
-        c_feat_rows.append([avg, float(deg), float(rhs_val), is_bound])
+                vals.append(cval)
+        b_leq.append(float(rhs_val))
 
-    # Linear rows (turn => and == into ≤)
-    for c in sorted(conss, key=lambda x: (len(m.getValsLinear(x)), str(x))):
-        coeffs = m.getValsLinear(c)  # dict[var_obj] -> coef
-        rhs = float(m.getRhs(c))
-        lhs = float(m.getLhs(c))
-        if rhs < 1e20:  # expr ≤ rhs
-            add_leq_row(coeffs, rhs, is_bound=0.0)
-        if lhs > -1e20:  # expr ≥ lhs  →  -expr ≤ -lhs
-            neg_coeffs = {v: -coef for v, coef in coeffs.items()}
-            add_leq_row(neg_coeffs, -lhs, is_bound=0.0)
+    # fold each original row into <= form
+    for constraint in conss_all:
+        coeffs = problem.getValsLinear(constraint)  # dict[var]->coef
+        rhs = float(problem.getRhs(constraint))
+        lhs = float(problem.getLhs(constraint))
+        if abs(rhs - lhs) < 1e-12:
+            # equality -> two rows
+            _add_leq_row(coeffs, rhs)
+            _add_leq_row({v: -coef for v, coef in coeffs.items()}, -lhs)
+        elif rhs < 1e20:
+            # <= rhs
+            _add_leq_row(coeffs, rhs)
+        else:
+            # >= lhs -> -expr <= -lhs
+            _add_leq_row({v: -coef for v, coef in coeffs.items()}, -lhs)
 
-    # Variable bounds (two rows per finite bound)
-    for v in mvars:
-        j = v_map[v.name]
-        lb, ub = _get_bounds(m, v)  # may be +/-1e50 for “infinite”
-        if _finite_ub(ub):
-            # x_j ≤ ub
-            add_leq_row({v: +1.0}, ub, is_bound=1.0)
-        if _finite_lb(lb):
-            # -x_j ≤ -lb
-            add_leq_row({v: -1.0}, -lb, is_bound=1.0)
+    # add finite variable bounds as <= rows
+    INF = 1e40
+    for var in scip_variables:
+        variable_idx = v_map[var.name]
+        try:
+            lb = float(var.getLb())
+            ub = float(var.getUb())
+        except Exception:
+            lb, ub = -INF, INF
+        if ub < INF:
+            _add_leq_row({var: +1.0}, ub)  # x_j <= ub
+        if lb > -INF:
+            _add_leq_row({var: -1.0}, -lb)  # -x_j <= -lb
 
-    # Build sparse A and vectors
-    m_rows = len(b_vec_list)
     A = torch.sparse_coo_tensor(
         indices=torch.tensor([ind_rows, ind_cols], dtype=torch.long),
         values=torch.tensor(vals, dtype=torch.float32),
-        size=(m_rows, nvars),
+        size=(len(b_leq), n_variables),
     ).coalesce()
-    b_vec = torch.tensor(b_vec_list, dtype=torch.float32)
+    b_vec = torch.tensor(b_leq, dtype=torch.float32)
 
-    # ----- normalize encoder features (NOT used by KKT math) ----------------
-    v_nodes_t = torch.tensor(v_nodes, dtype=torch.float32)
-    # avg coef per var = sum / degree
-    deg = v_nodes_t[:, 2].clamp(min=1.0)
-    v_nodes_t[:, 1] = v_nodes_t[:, 1] / deg
+    if add_pos_feat and not normalize_pos_feat:
+        # normalize only first 6 numeric features, keep 20 bits crisp {0,1}
+        v_num, v_bits = v_nodes[:, :6], v_nodes[:, 6:]
+        v_num = _minmax_normalization(v_num).clamp_(1e-5, 1.0)
+        v_nodes = torch.cat([v_num, v_bits], dim=1)
+    else:
+        # normalize everything (numeric + bits, or numeric only if no pos bits)
+        v_nodes = _minmax_normalization(v_nodes).clamp_(1e-5, 1.0)
 
-    # min–max per column to [0,1]
-    def _minmax01(x: torch.Tensor) -> torch.Tensor:
-        mn, mx = x.min(dim=0).values, x.max(dim=0).values
-        return (x - mn) / (mx - mn + 1e-9)
-
-    v_nodes_t = _minmax01(v_nodes_t).clamp_(0.0, 1.0)
-
-    c_nodes_t = (
-        torch.tensor(c_feat_rows, dtype=torch.float32)
-        if m_rows > 0
-        else torch.zeros(0, 4)
+    c_nodes = (
+        _minmax_normalization(c_nodes).clamp_(1e-5, 1.0)
+        if c_nodes.numel() > 0
+        else c_nodes
     )
-    if c_nodes_t.numel() > 0:
-        c_nodes_t = _minmax01(c_nodes_t).clamp_(0.0, 1.0)
+
+    # attach artifacts to A
+    # (So they can be accessed later without changing the return signature.)
+    A.edge_index = edge_index  # [2, nnz] over ORIGINAL constraints
+    A.edge_attr = edge_attr  # [nnz, 1] true A_ij
+    A.incidence = incidence  # (m_orig, n) binary adjacency
+    A.graph_b = graph_b  # [m_orig] rhs
+    A.graph_sense = graph_s  # [m_orig] sense codes
+
+    # tensors to return
+    b_vars = torch.tensor(b_idx, dtype=torch.int32)
 
     return (
         A,
-        v_map,
-        # {v.name: i for v, i in v_map.items()},  # return a name→index view for reference
-        v_nodes_t,
-        c_nodes_t,
-        torch.tensor(b_vars, dtype=torch.int32),
-        b_vec,
-        c_vec,
+        v_map,  # name -> column index
+        v_nodes,  # variable node features [n, 6+12] in [0,1]
+        c_nodes,  # constraint node features [m_orig, 4] in [0,1]
+        b_vars,  # indices of binary variables
+        b_vec,  # RHS for <= rows (KKT)
+        c_vec,  # objective for MIN
     )
