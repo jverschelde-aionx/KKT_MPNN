@@ -11,7 +11,7 @@ from pathlib import Path
 import configargparse
 import torch
 
-from instances.common import COMBINATORIAL_AUCTION, INDEPENDANT_SET, Settings
+from instances.common import ProblemClass, Settings
 from instances.generators import generate_instances
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -32,7 +32,7 @@ def generate() -> None:
         "--problems",
         type=str,
         nargs="+",
-        default=[INDEPENDANT_SET, COMBINATORIAL_AUCTION],
+        default=[ProblemClass.INDEPENDANT_SET, ProblemClass.COMBINATORIAL_AUCTION],
         help="Problem type",
     )
     d.add_argument(
@@ -67,6 +67,14 @@ def generate() -> None:
         "--solve", action="store_true", help="Run Gurobi to collect solution pools"
     )
     d.add_argument(
+        "--add_pos_feat",
+        action="store_true",
+        help="Add positional features to variable features",
+    )
+    d.add_argument(
+        "--norm_pos_feat", action="store_true", help="Normalize positional features"
+    )
+    d.add_argument(
         "--gurobi_threads", type=int, default=4, help="Number of threads for Gurobi"
     )
     d.add_argument(
@@ -84,6 +92,8 @@ def generate() -> None:
         ca_sizes=tuple(args.ca_sizes),
         test_split=args.test_split,
         val_split=args.val_split,
+        add_positional_features=args.add_pos_feat,
+        normalize_positional_features=args.norm_pos_feat,
         n_instances=args.n_instances,
         data_root=Path(args.data_root),
         solve=args.solve,

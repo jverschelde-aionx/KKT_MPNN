@@ -24,7 +24,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPl
 from torch.utils.data import DataLoader
 
 import wandb
-from instances.common import COMBINATORIAL_AUCTION, INDEPENDANT_SET
+from instances.common import ProblemClass
 from models.gnn_transformer import GNNTransformer
 from models.losses import KKTLoss, KKTLossGraph, kkt_metrics, kkt_metrics_graph
 from models.policy_encoder import (
@@ -425,7 +425,7 @@ def _sol_path_from_bg(bg_path: str) -> Path:
     parts[idx] = "solution"
     # replace .bg -> .sol
     stem = p.name[:-3] if p.name.endswith(".bg") else p.name
-    sol_name = stem + "sol"
+    sol_name = stem + ".sol"
     return Path(*parts[:-1]) / sol_name
 
 
@@ -1014,18 +1014,6 @@ def eval_epoch(
 
 
 def train():
-    try:
-        sdp_kernel.enable_flash_sdp(True)
-        sdp_kernel.enable_mem_efficient_sdp(True)
-        sdp_kernel.enable_math_sdp(False)
-    except Exception:
-        print("Failed to enable flash sdp")
-        pass
-
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
-        "garbage_collection_threshold:0.6,max_split_size_mb:128"
-    )
-
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
         description="[KKT] Train GNN-Transformer",
@@ -1114,7 +1102,7 @@ def train():
         "--problems",
         type=str,
         nargs="+",
-        default=[INDEPENDANT_SET, COMBINATORIAL_AUCTION],
+        default=[ProblemClass.INDEPENDANT_SET, ProblemClass.COMBINATORIAL_AUCTION],
         help="Problem type",
     )
     d.add_argument(

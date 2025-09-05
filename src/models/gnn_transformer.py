@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from loguru import logger
 
+import wandb
 from graphtrans.modules.masked_transformer_encoder import MaskedOnlyTransformerEncoder
 from graphtrans.modules.transformer_encoder import TransformerNodeEncoder
 from graphtrans.modules.utils import pad_batch
@@ -82,6 +83,7 @@ class GNNTransformer(BaseModel):
     ):
         super().__init__()
         self.gnn_node = gnn_node
+        self.node_type_embed = nn.Embedding(2, args.d_model)  # var/constr
 
         # load or freeze GNN weights
         if args.pretrained_gnn:
@@ -111,15 +113,24 @@ class GNNTransformer(BaseModel):
         h_node = self.gnn_node(batched_data, perturb)
         h_node = self.gnn2transformer(h_node)  # [s, b, d_model]
 
+        # Pad in the front
         padded_h_node, src_padding_mask, num_nodes, mask, max_num_nodes = pad_batch(
             h_node,
             batched_data.batch,
             get_mask=True,
-        )  # Pad in the front
+        )
 
-        transformer_out = padded_h_node
+        node_type = torch.cat(
+            [batched_data.is_constr_node, batched_data.is_var_node], dim=0
+        ).long()[~src_padding_mask]  # shape (N_tot,)
+
+        # add node type embedding
+        transformer_out = padded_h_node + self.node_type_embed(node_type).view_as(
+            padded_h_node
+        )
         if self.pos_encoder is not None:
             transformer_out = self.pos_encoder(transformer_out)
+
         # masked-only encoder
         if self.num_encoder_layers_masked > 0:
             adj_list = getattr(batched_data, "adj_list", None)

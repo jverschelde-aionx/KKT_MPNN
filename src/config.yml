@@ -1,7 +1,7 @@
 data:
   problems: ["IS","CA"]
-  is_sizes: [10, 50, 100, 200, 500, 1000]
-  ca_sizes: [10, 50, 100, 200, 500, 1000]
+  is_sizes: [10, 50]
+  ca_sizes: [10, 50]
   test_split: 0.15
   val_split: 0.15
   n_instances: 10000
@@ -13,6 +13,8 @@ data:
   dataset: "ogbg-code2"
   aug: "baseline"
   feature: "full"
+  add_pos_feat: true
+  norm_pos_feat: false
 
 model:
   graph_pooling: mean
@@ -50,17 +52,17 @@ transformer:
 
 training:
   devices: "0"
-  batch_size: 4
-  eval_batch_size: 4
+  batch_size: 32
+  eval_batch_size: 32
   epochs: 50
   num_workers: 0
-  lr: 0.0001
+  lr: 0.001
   weight_decay: 0.0
   loss: kkt-graph
   scheduler: none
   pct_start: 0.3
   grad_clip: 1.0
-  amp: true
+  amp: false
   seed: 42
   kkt_w_primal: 0.1
   kkt_w_dual: 0.1

@@ -13,6 +13,8 @@ class Settings:
     data_root: Path = Path("../data")
     test_split: float = 0.15
     val_split: float = 0.15
+    add_positional_features: bool = True
+    normalize_positional_features: bool = False
     # Independent‑Set
     edge_probability: float = 0.25
     # Combinatorial‑Auction
@@ -27,5 +29,26 @@ class Settings:
     n_jobs: int = max(mp.cpu_count() // 2, 1)
 
 
-INDEPENDANT_SET = "IS"
-COMBINATORIAL_AUCTION = "CA"
+class ProblemClass:
+    INDEPENDANT_SET = "IS"
+    COMBINATORIAL_AUCTION = "CA"
+
+
+class VariableFeature:
+    OBJ_COEF = 0
+    AVG_COEF = 1
+    DEGREE = 2
+    MAX_COEF = 3
+    MIN_COEF = 4
+    IS_INTEGER = 5
+
+
+class ConstraintFeature:
+    AVG_COEF = 0
+    DEGREE = 1
+    RHS = 2
+    SENSE = 3
+
+
+class EdgeFeature:
+    COEF = 0
