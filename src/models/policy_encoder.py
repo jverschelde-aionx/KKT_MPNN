@@ -114,13 +114,20 @@ class GNNPolicy(torch.nn.Module):
         edge_features,  # (|E|, edge_nfeats)
         variable_features,
     ):  # (n_v, var_nfeats)
+        print("Raw constraint features:", constraint_features)
+        print("Raw variable features:", variable_features)
+        print("Raw edge indices:", edge_indices)
+        print("Raw edge features:", edge_features)
         rev_idx = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
 
         # numeric embeddings + small MLP
         c = self.cons_proj(self.cons_num_emb(constraint_features))
-
         v = self.var_proj(self.var_num_emb(variable_features))
         e = self.edge_proj(self.edge_num_emb(edge_features))
+
+        print("Raw constraint emb:", c.shape, "\n", c)
+        print("Raw variable emb:", v.shape, "\n", v)
+        print("Raw edge emb:", e.shape, "\n", e)
 
         # two rounds of bipartite convolution
         c = self.conv_v_to_c(v, rev_idx, e, c)

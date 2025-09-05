@@ -29,7 +29,7 @@ model:
   embedding_size: 128
   cons_nfeats: 4
   edge_nfeats: 1
-  var_nfeats: 6
+  var_nfeats: 18
   num_emb_type: periodic
   num_emb_bins: 32
   num_emb_freqs: 16
