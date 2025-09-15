@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import configargparse
 import numpy as np
@@ -18,7 +18,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from loguru import logger
-from torch.backends.cuda import sdp_kernel
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader
@@ -26,13 +25,12 @@ from torch.utils.data import DataLoader
 import wandb
 from instances.common import ProblemClass
 from models.gnn_transformer import GNNTransformer
-from models.losses import KKTLoss, KKTLossGraph, kkt_metrics, kkt_metrics_graph
+from models.losses import KKTLoss, kkt_metrics
 from models.policy_encoder import (
     GNNPolicy,
     GraphDataset,
     PolicyEncoder,
     collate,
-    collate_graph_only,
 )
 
 MAX_HISTOGRAM_SAMPLES = 200_000  # cap histogram payload size
@@ -516,7 +514,7 @@ def log_tensor_stats(prefix: str, t: torch.Tensor, step: int, hist_every: int = 
 def train_epoch(
     model: nn.Module,
     loader: DataLoader,
-    criterion: KKTLoss | KKTLossGraph,
+    criterion: KKTLoss,
     optimizer: optim.Optimizer,
     scaler: GradScaler,
     device: torch.device,
@@ -534,7 +532,6 @@ def train_epoch(
     model.train()
     total_loss, n_batches = 0.0, 0
     step = start_step
-    use_graph_loss = isinstance(criterion, KKTLossGraph)
 
     for batch in loader:
         step_start_time = time.time()
@@ -614,7 +611,7 @@ def train_epoch(
             # Also log distributions of b and c for convenience
             log_tensor_stats("inputs/b_vector", b_valid, step)
             log_tensor_stats("inputs/c_vector", c_valid, step)
-            if not isinstance(criterion, KKTLossGraph) and len(sparse_A_matrices) > 0:
+            if len(sparse_A_matrices) > 0:
                 A_values = torch.cat([A.values() for A in sparse_A_matrices]).to(
                     device=x_hat.device
                 )
@@ -634,65 +631,32 @@ def train_epoch(
             )
 
         with autocast(enabled=scaler.is_enabled()):
-            if use_graph_loss:
-                # graph-native loss expects the PyG Batch as the 3rd arg
-                loss = criterion(
-                    x_hat,
-                    lambda_hat,
-                    batch_graph,
-                    b_padded,
-                    c_padded,
-                    b_mask,
-                    c_mask,
-                    num_constraints_per_graph,
-                    num_variables_per_graph,
-                )
-            else:
-                # matrix loss expects A_list; keep them on the right device
-                sparse_A_matrices = [
-                    A
-                    if A.device == x_hat.device
-                    else A.to(x_hat.device, non_blocking=True)
-                    for A in sparse_A_matrices
-                ]
-                loss = criterion(
-                    x_hat,
-                    lambda_hat,
-                    sparse_A_matrices,
-                    b_padded,
-                    c_padded,
-                    b_mask,
-                    c_mask,
-                    num_constraints_per_graph,
-                    num_variables_per_graph,
-                )
+            # matrix loss expects A_list; keep them on the right device
+            sparse_A_matrices = [
+                A if A.device == x_hat.device else A.to(x_hat.device, non_blocking=True)
+                for A in sparse_A_matrices
+            ]
+            loss = criterion(
+                x_hat,
+                lambda_hat,
+                sparse_A_matrices,
+                b_padded,
+                c_padded,
+                num_constraints_per_graph,
+                num_variables_per_graph,
+            )
 
         # Term breakdown (extremely useful to see what diverges)
         if (step % log_every) == 0:
-            if isinstance(criterion, KKTLossGraph):
-                kkt = kkt_metrics_graph(
-                    x_hat,
-                    lambda_hat,
-                    batch_graph,
-                    b_padded,
-                    c_padded,
-                    b_mask,
-                    c_mask,
-                    num_constraints_per_graph,
-                    num_variables_per_graph,
-                )
-            else:
-                kkt = kkt_metrics(
-                    x_hat,
-                    lambda_hat,
-                    sparse_A_matrices,
-                    b_padded,
-                    c_padded,
-                    b_mask,
-                    c_mask,
-                    num_constraints_per_graph,
-                    num_variables_per_graph,
-                )
+            kkt = kkt_metrics(
+                x_hat,
+                lambda_hat,
+                sparse_A_matrices,
+                b_padded,
+                c_padded,
+                num_constraints_per_graph,
+                num_variables_per_graph,
+            )
             wandb.log(
                 {f"train_kkt/{name}": value for name, value in kkt.items()}, step=step
             )
@@ -748,7 +712,6 @@ def train_epoch(
                 )
             if stop_on_nonfinite:
                 raise RuntimeError(f"Non‑finite loss at step {step}")
-            print(f"Non‑finite loss at step {step}")
             continue
 
         # ----- Backward -----
@@ -835,7 +798,6 @@ def eval_epoch(
     model, loader, criterion, device, amp=False
 ) -> Tuple[float, Dict[str, float]]:
     model.eval()
-    use_graph_loss = isinstance(criterion, KKTLossGraph)
     total_loss, n_batches = 0.0, 0
     term_sums = {"primal": 0.0, "dual": 0.0, "stationarity": 0.0, "compl_slack": 0.0}
 
@@ -868,58 +830,28 @@ def eval_epoch(
 
         with autocast(enabled=amp):
             x_hat, lam_hat = model(batch_graph)
-            if use_graph_loss:
-                loss = criterion(
-                    x_hat,
-                    lam_hat,
-                    batch_graph,
-                    b_pad,
-                    c_pad,
-                    b_mask,
-                    c_mask,
-                    m_sizes,
-                    n_sizes,
-                )
-                metrics = kkt_metrics_graph(
-                    x_hat,
-                    lam_hat,
-                    batch_graph,
-                    b_pad,
-                    c_pad,
-                    b_mask,
-                    c_mask,
-                    m_sizes,
-                    n_sizes,
-                )
-            else:
-                A_list = [
-                    A
-                    if A.device == x_hat.device
-                    else A.to(x_hat.device, non_blocking=True)
-                    for A in A_list
-                ]
-                loss = criterion(
-                    x_hat,
-                    lam_hat,
-                    A_list,
-                    b_pad,
-                    c_pad,
-                    b_mask,
-                    c_mask,
-                    m_sizes,
-                    n_sizes,
-                )
-                metrics = kkt_metrics(
-                    x_hat,
-                    lam_hat,
-                    A_list,
-                    b_pad,
-                    c_pad,
-                    b_mask,
-                    c_mask,
-                    m_sizes,
-                    n_sizes,
-                )
+            A_list = [
+                A if A.device == x_hat.device else A.to(x_hat.device, non_blocking=True)
+                for A in A_list
+            ]
+            loss = criterion(
+                x_hat,
+                lam_hat,
+                A_list,
+                b_pad,
+                c_pad,
+                m_sizes,
+                n_sizes,
+            )
+            metrics = kkt_metrics(
+                x_hat,
+                lam_hat,
+                A_list,
+                b_pad,
+                c_pad,
+                m_sizes,
+                n_sizes,
+            )
         total_loss += loss.item()
         for k in term_sums:
             term_sums[k] += metrics[k]
@@ -1052,7 +984,6 @@ def train():
     t.add_argument("--num_workers", type=int, default=0)
     t.add_argument("--lr", type=float, default=1e-3)
     t.add_argument("--weight_decay", type=float, default=0.0)
-    t.add_argument("--loss", choices=["kkt", "kkt-graph"], default="kkt")
     t.add_argument(
         "--scheduler", choices=["plateau", "cosine", "onecycle", "none"], default="none"
     )
@@ -1167,7 +1098,6 @@ def train():
         f"+GNNT={args.gnn_type}"
         f"+emb={args.gnn_emb_dim}"
         f"+lr={args.lr}"
-        f"+loss={args.loss}"
         f"+{datetime.now().strftime('%m%d-%H%M%S')}"
     )
     wandb.init(project="kkt_transformer", name=run_name, config=vars(args))
@@ -1198,17 +1128,15 @@ def train():
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_graph_only if args.loss == "kkt-graph" else collate,
+        collate_fn=collate,
     )
     valid_loader = DataLoader(
         valid_data,
         batch_size=eval_bs,
         shuffle=False,
         num_workers=args.num_workers,
-        collate_fn=collate_graph_only if args.loss == "kkt-graph" else collate,
+        collate_fn=collate,
     )
-
-    print(args)
 
     # Retrieve problem instance dimensions (m,n) from the first sample
     (batch_graph, A_list, _b, _c, _bm, _cm, m_sizes, n_sizes, sources) = next(
@@ -1232,23 +1160,15 @@ def train():
     logger.info("Model parameters: {}", model.count_parameters())
     wandb.watch(model, log="gradients", log_graph=False)
 
-    loss_fn = (
-        KKTLossGraph(
-            w_primal=args.kkt_w_primal,
-            w_dual=args.kkt_w_dual,
-            w_stat=args.kkt_w_station,
-            w_comp=args.kkt_w_comp,
-        )
-        if args.loss == "kkt-graph"
-        else KKTLoss(
-            m,
-            n,
-            w_primal=args.kkt_w_primal,
-            w_dual=args.kkt_w_dual,
-            w_stat=args.kkt_w_station,
-            w_comp=args.kkt_w_comp,
-        )
+    loss_fn = KKTLoss(
+        m,
+        n,
+        w_primal=args.kkt_w_primal,
+        w_dual=args.kkt_w_dual,
+        w_stat=args.kkt_w_station,
+        w_comp=args.kkt_w_comp,
     )
+
     criterion = loss_fn.to(device)
 
     optimizer = optim.AdamW(

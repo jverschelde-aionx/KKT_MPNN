@@ -1,7 +1,7 @@
 data:
   problems: ["IS","CA"]
-  is_sizes: [10, 50]
-  ca_sizes: [10, 50]
+  is_sizes: [10,50]
+  ca_sizes: [10,50]
   test_split: 0.15
   val_split: 0.15
   n_instances: 10000
@@ -48,7 +48,9 @@ transformer:
   num_encoder_layers: 4
   transformer_norm_input: true
   num_encoder_layers_masked: 0
-  transformer_prenorm: false
+  transformer_prenorm: true
+  pos_encoder: true
+
 
 training:
   devices: "0"
@@ -56,11 +58,10 @@ training:
   eval_batch_size: 32
   epochs: 50
   num_workers: 0
-  lr: 0.001
-  weight_decay: 0.0
-  loss: kkt-graph
-  scheduler: none
-  pct_start: 0.3
+  lr: 0.0005
+  weight_decay: 0.01
+  scheduler: cosine
+  pct_start: 0.05
   grad_clip: 1.0
   amp: false
   seed: 42
