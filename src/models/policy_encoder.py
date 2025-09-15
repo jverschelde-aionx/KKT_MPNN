@@ -24,7 +24,10 @@ class GNNPolicy(torch.nn.Module):
             "--edge_nfeats", default=1, type=int, help="Number of features for edges"
         )
         group.add_argument(
-            "--var_nfeats", default=6, type=int, help="Number of features for variables"
+            "--var_nfeats",
+            default=18,
+            type=int,
+            help="Number of features for variables",
         )
         group.add_argument(
             "--num_emb_type", choices=["periodic", "pwl", "linear"], default="periodic"
@@ -107,6 +110,33 @@ class GNNPolicy(torch.nn.Module):
             torch.nn.Linear(d_out, 1, bias=False),
         )
 
+    def encode(
+        self,
+        constraint_features: torch.Tensor,
+        edge_indices: torch.Tensor,
+        edge_features: torch.Tensor,
+        variable_features: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        rev_idx = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
+
+        periodic_c = self.cons_num_emb(constraint_features)
+        periodic_v = self.var_num_emb(variable_features)
+        periodic_e = self.edge_num_emb(edge_features)
+
+        # numeric embeddings + small MLP
+        c = self.cons_proj(periodic_c)
+        v = self.var_proj(periodic_v)
+        e = self.edge_proj(periodic_e)
+
+        # two rounds of bipartite convolution
+        c = self.conv_v_to_c(v, rev_idx, e, c)
+        v = self.conv_c_to_v(c, edge_indices, e, v)
+
+        c = self.conv_v_to_c2(v, rev_idx, e, c)
+        v = self.conv_c_to_v2(c, edge_indices, e, v)
+
+        return c, v
+
     def forward(
         self,
         constraint_features,  # (n_c, cons_nfeats)
@@ -114,27 +144,9 @@ class GNNPolicy(torch.nn.Module):
         edge_features,  # (|E|, edge_nfeats)
         variable_features,
     ):  # (n_v, var_nfeats)
-        print("Raw constraint features:", constraint_features)
-        print("Raw variable features:", variable_features)
-        print("Raw edge indices:", edge_indices)
-        print("Raw edge features:", edge_features)
-        rev_idx = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
-
-        # numeric embeddings + small MLP
-        c = self.cons_proj(self.cons_num_emb(constraint_features))
-        v = self.var_proj(self.var_num_emb(variable_features))
-        e = self.edge_proj(self.edge_num_emb(edge_features))
-
-        print("Raw constraint emb:", c.shape, "\n", c)
-        print("Raw variable emb:", v.shape, "\n", v)
-        print("Raw edge emb:", e.shape, "\n", e)
-
-        # two rounds of bipartite convolution
-        c = self.conv_v_to_c(v, rev_idx, e, c)
-        v = self.conv_c_to_v(c, edge_indices, e, v)
-        c = self.conv_v_to_c2(v, rev_idx, e, c)
-        v = self.conv_c_to_v2(c, edge_indices, e, v)
-
+        c, v = self.encode(
+            constraint_features, edge_indices, edge_features, variable_features
+        )
         # optional scalar head
         return self.output_module(v).squeeze(-1)  # (n_v,)
 
@@ -370,22 +382,12 @@ class PolicyEncoder(torch.nn.Module):
         self.out_dim = args.embedding_size  # 64 by default
 
     def forward(self, data, perturb=None):
-        c = data.constraint_features  # [n_c, f_c]
-        v = data.variable_features  # [n_v, f_v]
-        e_idx = data.edge_index  # shape [2, |E|]
-        e_attr = data.edge_attr  # [|E|, f_e]
-
-        # identical to first part of original GNNPolicy.forward
-        rev_idx = torch.stack([e_idx[1], e_idx[0]], dim=0)
-        c = self.base.cons_proj(self.base.cons_num_emb(c))
-        e = self.base.edge_proj(self.base.edge_num_emb(data.edge_attr))
-        v = self.base.var_proj(self.base.var_num_emb(v))
-
-        c = self.base.conv_v_to_c(v, rev_idx, e, c)
-        v = self.base.conv_c_to_v(c, e_idx, e, v)
-        c = self.base.conv_v_to_c2(v, rev_idx, e, c)
-        v = self.base.conv_c_to_v2(c, e_idx, e, v)
-
+        c, v = self.base.encode(
+            data.constraint_features,  # [n_c, f_c]
+            data.edge_index,  # [2, |E|]
+            data.edge_attr,  # [|E|, f_e]
+            data.variable_features,  # [n_v, f_v]
+        )
         h = torch.cat([c, v], dim=0)  # [n_c+n_v, 64]
         if perturb is not None:
             h = h + perturb
@@ -457,36 +459,4 @@ def collate(
         c_mask[i, :n] = True
 
     batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
-    return batch_graph, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes, sources
-
-
-def collate_graph_only(batch):
-    # same as default collate, but does NOT build A_sparse/A_list
-    # return an empty list for A_list to keep unpacking compatible
-    graphs, b_list, c_list, m_sizes, n_sizes, sources = [], [], [], [], [], []
-    for data in batch:
-        data.constraint_features = _right_pad(data.constraint_features, _CONS_PAD)
-        data.variable_features = _right_pad(data.variable_features, _VAR_PAD)
-        graphs.append(data)
-        b_list.append(data.b_vec)
-        c_list.append(data.c_vec)
-        m_sizes.append(int(data.b_vec.numel()))
-        n_sizes.append(int(data.c_vec.numel()))
-        sources.append(getattr(data, "sample_path", "<unknown>"))
-
-    B = len(batch)
-    max_m, max_n = max(m_sizes), max(n_sizes)
-    b_pad = torch.zeros(B, max_m)
-    b_mask = torch.zeros(B, max_m, dtype=torch.bool)
-    c_pad = torch.zeros(B, max_n)
-    c_mask = torch.zeros(B, max_n, dtype=torch.bool)
-    for i, (b, m) in enumerate(zip(b_list, m_sizes)):
-        b_pad[i, :m] = b
-        b_mask[i, :m] = True
-    for i, (c, n) in enumerate(zip(c_list, n_sizes)):
-        c_pad[i, :n] = c
-        c_mask[i, :n] = True
-
-    batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
-    A_list = []  # placeholder
     return batch_graph, A_list, b_pad, c_pad, b_mask, c_mask, m_sizes, n_sizes, sources

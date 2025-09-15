@@ -120,14 +120,64 @@ class GNNTransformer(BaseModel):
             get_mask=True,
         )
 
-        node_type = torch.cat(
-            [batched_data.is_constr_node, batched_data.is_var_node], dim=0
-        ).long()[~src_padding_mask]  # shape (N_tot,)
+        S, B, d = padded_h_node.size(0), padded_h_node.size(1), padded_h_node.size(2)
+        device = padded_h_node.device
 
-        # add node type embedding
-        transformer_out = padded_h_node + self.node_type_embed(node_type).view_as(
-            padded_h_node
-        )
+        # Ensure mask is on the right device and boolean
+        src_padding_mask = src_padding_mask.to(
+            device=device, dtype=torch.bool
+        )  # [B, S]
+
+        # Per-graph counts of valid tokens (right-aligned due to left padding)
+        valid_counts = (~src_padding_mask).sum(dim=1).tolist()  # list of length B
+
+        # We also need to know how many constraints vs variables per graph.
+        # Compute them directly from the batched data & its batch vector.
+        batch_vec = batched_data.batch.to(device)  # [N_tot]
+        is_constr = batched_data.is_constr_node.to(device)  # [N_tot]
+        is_var = batched_data.is_var_node.to(device)  # [N_tot]
+        B_check = int(batch_vec.max().item()) + 1
+        assert B_check == B, (B_check, B)
+
+        m_sizes = []
+        n_sizes = []
+        for i in range(B):
+            sel = batch_vec == i
+            m_i = int(is_constr[sel].sum().item())
+            n_i = int(is_var[sel].sum().item())
+            m_sizes.append(m_i)
+            n_sizes.append(n_i)
+            assert m_i + n_i == valid_counts[i], (m_i, n_i, valid_counts[i])
+
+        # -------- Build [B, S] grids aligned with left padding --------
+        # node_type_grid: 0 = constraint, 1 = variable, pad = 0 (arbitrary)
+        node_type_grid = torch.zeros(
+            (B, S), dtype=torch.long, device=device
+        )  # default pad=0
+        var_mask_grid = torch.zeros((B, S), dtype=torch.bool, device=device)
+        con_mask_grid = torch.zeros((B, S), dtype=torch.bool, device=device)
+
+        for i in range(B):
+            n = valid_counts[i]
+            if n == 0:
+                continue
+            m_i, n_i = m_sizes[i], n_sizes[i]
+            # The last n positions are real tokens; within them: first m_i are constraints, then n_i variables
+            start = S - n  # left padding length
+            split = start + m_i
+            # constraints segment
+            con_mask_grid[i, start:split] = True
+            # variables segment
+            var_mask_grid[i, split:S] = True
+            # node type as 0/1 in the same layout
+            node_type_grid[i, split:S] = 1
+
+        # Add node-type embedding in the SAME layout as padded_h_node
+        # node_type_embed: Embedding(2, d_model)
+        type_emb = self.node_type_embed(node_type_grid)  # [B, S, d]
+        transformer_out = padded_h_node + type_emb.transpose(0, 1)  # [S, B, d]
+
+        # (Optional) positional encoding
         if self.pos_encoder is not None:
             transformer_out = self.pos_encoder(transformer_out)
 
@@ -156,17 +206,22 @@ class GNNTransformer(BaseModel):
                 transformer_out, src_padding_mask
             )  # [s, b, h], [b, s]
 
-        # remove padding & flatten to (N_tot, d)
-        # transformer_out: S, B, d  →  B, S, d
-        out_B_S_d = transformer_out.transpose(0, 1)
-        valid_h = out_B_S_d[~src_padding_mask]  # (N_tot, d)
+        # -------- Unpad consistently for heads --------
+        out_B_S_d = transformer_out.transpose(0, 1)  # [B, S, d]
+        valid_mask = ~src_padding_mask  # [B, S] True where real tokens
+        valid_h = out_B_S_d[valid_mask]  # [N_tot, d]
 
-        # build masks that align with valid_h
-        var_mask = batched_data.is_var_node.to(valid_h.device)
-        constr_mask = batched_data.is_constr_node.to(valid_h.device)
+        # 1D masks aligned with valid_h
+        var_mask_1d = var_mask_grid[valid_mask]  # [N_tot] bool
+        con_mask_1d = con_mask_grid[valid_mask]  # [N_tot] bool
 
-        # per‑node scalar predictions
-        x_hat, lam_hat = self.head(valid_h, var_mask, constr_mask)
+        # Safety checks
+        N_tot = int(var_mask_1d.numel())
+        assert N_tot == int(valid_h.size(0))
+        assert (var_mask_1d.sum() + con_mask_1d.sum()).item() == N_tot
+
+        # Heads
+        x_hat, lam_hat = self.head(valid_h, var_mask_1d, con_mask_1d)
         return x_hat, lam_hat
 
     def epoch_callback(self, epoch):
@@ -220,7 +275,6 @@ class VarConstHead(nn.Module):
         self.to_xhat = nn.Linear(in_dim, 1)  # x is free (continuous)
         self.to_lam = nn.Sequential(
             nn.Linear(in_dim, 1),  # λ ≥ 0 for all ≤ rows
-            nn.Softplus(),
         )
 
     def forward(self, h, var_mask, constr_mask):
