@@ -6,9 +6,11 @@ from typing import Tuple
 
 @dataclass(frozen=True)
 class Settings:
-    problems: Tuple[str, ...]  # ('IS','CA')
+    problems: Tuple[str, ...]  # ('IS','CA', 'SC', 'CFL')
     is_sizes: Tuple[int, ...]
     ca_sizes: Tuple[int, ...]
+    sc_sizes: Tuple[int, ...]
+    cfl_sizes: Tuple[int, ...]
     n_instances: int = 1000
     data_root: Path = Path("../data")
     test_split: float = 0.15
@@ -32,6 +34,8 @@ class Settings:
 class ProblemClass:
     INDEPENDANT_SET = "IS"
     COMBINATORIAL_AUCTION = "CA"
+    SET_COVER = "SC"
+    CAPACITATED_FACILITY_LOCATION = "CFL"
 
 
 class VariableFeature:

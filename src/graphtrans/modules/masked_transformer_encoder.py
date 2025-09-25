@@ -127,11 +127,15 @@ class MaskedTransformerBlock(nn.Module):
 class MaskedOnlyTransformerEncoder(nn.Module):
     @staticmethod
     def add_args(parser):
-        group = parser.add_argument_group(
-            "Masked Transformer Encoder -- architecture config"
-        )
+        group = parser.add_argument_group("transformer")
         group.add_argument("--num_encoder_layers_masked", type=int, default=0)
         group.add_argument("--transformer_prenorm", action="store_true", default=False)
+
+    @staticmethod
+    def name(args):
+        name = f"-enc_layer_masked={args.num_encoder_layers_masked}"
+        name += "-prenorm" if args.transformer_prenorm else "-postnorm"
+        return name
 
     def __init__(self, args):
         super().__init__()

@@ -36,14 +36,10 @@ class BaseModel(nn.Module):
 
 class GNNTransformer(BaseModel):
     @staticmethod
-    def get_emb_dim(args):
-        return args.gnn_emb_dim
-
-    @staticmethod
     def add_args(parser):
         TransformerNodeEncoder.add_args(parser)
         MaskedOnlyTransformerEncoder.add_args(parser)
-        group = parser.add_argument_group("GNNTransformer - Training Config")
+        group = parser.add_argument_group("transformer")
         group.add_argument("--pos_encoder", default=False, action="store_true")
         group.add_argument(
             "--pretrained_gnn",
@@ -57,34 +53,26 @@ class GNNTransformer(BaseModel):
             default=None,
             help="Freeze gnn_node weight from epoch `freeze_gnn`",
         )
+        group.add_argument("--type_emb", default=True, action="store_true")
 
     @staticmethod
     def name(args):
-        name = f"{args.model_type}-pooling={args.graph_pooling}"
-        name += "-norm_input" if args.transformer_norm_input else ""
-        name += f"+{args.gnn_type}"
-        name += "-virtual" if args.gnn_virtual_node else ""
-        name += f"-JK={args.gnn_JK}"
-        name += f"-enc_layer={args.num_encoder_layers}"
-        name += f"-enc_layer_masked={args.num_encoder_layers_masked}"
-        name += f"-d={args.d_model}"
-        name += f"-act={args.transformer_activation}"
-        name += f"-tdrop={args.transformer_dropout}"
-        name += f"-gdrop={args.gnn_dropout}"
+        name = "-pos_encoder" if args.pos_encoder else ""
         name += "-pretrained_gnn" if args.pretrained_gnn else ""
         name += f"-freeze_gnn={args.freeze_gnn}" if args.freeze_gnn is not None else ""
-        name += "-prenorm" if args.transformer_prenorm else "-postnorm"
+        name += "-type_emb" if args.type_emb else ""
+        name += TransformerNodeEncoder.name(args)
+        name += MaskedOnlyTransformerEncoder.name(args)
         return name
 
     def __init__(
         self,
         args,
-        gnn_node: Optional[nn.Module] = None,
+        gnn_node: nn.Module,
     ):
         super().__init__()
         self.gnn_node = gnn_node
         self.node_type_embed = nn.Embedding(2, args.d_model)  # var/constr
-
         # load or freeze GNN weights
         if args.pretrained_gnn:
             # logger.info(self.gnn_node)
@@ -93,10 +81,9 @@ class GNNTransformer(BaseModel):
             logger.info("Load GNN state from: {}", state_dict.keys())
             self.gnn_node.load_state_dict(state_dict)
         self.freeze_gnn = args.freeze_gnn
+        self.type_emb = args.type_emb
 
-        # projection from GNN dim to transformer dim
-        gnn_emb_dim = gnn_node.out_dim
-        self.gnn2transformer = nn.Linear(gnn_emb_dim, args.d_model)
+        self.gnn2transformer = nn.Linear(self.gnn_node.out_dim, args.d_model)
         self.pos_encoder = (
             PositionalEncoding(args.d_model, dropout=0) if args.pos_encoder else None
         )
@@ -174,8 +161,11 @@ class GNNTransformer(BaseModel):
 
         # Add node-type embedding in the SAME layout as padded_h_node
         # node_type_embed: Embedding(2, d_model)
-        type_emb = self.node_type_embed(node_type_grid)  # [B, S, d]
-        transformer_out = padded_h_node + type_emb.transpose(0, 1)  # [S, B, d]
+        if self.type_emb:
+            type_emb = self.node_type_embed(node_type_grid)  # [B, S, d]
+            transformer_out = padded_h_node + type_emb.transpose(0, 1)  # [S, B, d]
+        else:
+            transformer_out = padded_h_node  # [S, B, d]
 
         # (Optional) positional encoding
         if self.pos_encoder is not None:
