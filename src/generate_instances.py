@@ -48,6 +48,18 @@ def generate() -> None:
         default=[10, 50, 100, 200, 500, 1000],
     )
     d.add_argument(
+        "--sc_sizes",
+        type=int,
+        nargs="+",
+        default=[10, 50, 100, 200, 500, 1000],
+    )
+    d.add_argument(
+        "--cfl_sizes",
+        type=int,
+        nargs="+",
+        default=[10, 50, 100, 200, 500, 1000],
+    )
+    d.add_argument(
         "--n_instances", type=int, default=1000, help="Number of instances per size"
     )
     d.add_argument(
@@ -90,6 +102,8 @@ def generate() -> None:
         problems=tuple(args.problems),
         is_sizes=tuple(args.is_sizes),
         ca_sizes=tuple(args.ca_sizes),
+        sc_sizes=tuple(args.sc_sizes),
+        cfl_sizes=tuple(args.cfl_sizes),
         test_split=args.test_split,
         val_split=args.val_split,
         add_positional_features=args.add_pos_feat,

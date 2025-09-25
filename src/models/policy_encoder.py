@@ -12,8 +12,14 @@ _VAR_PAD: int = 18  # global max variable   feature width
 class GNNPolicy(torch.nn.Module):
     @staticmethod
     def add_args(parser):
-        BipartiteGraphConvolution.add_args(parser)
-        group = parser.add_argument_group("GNNPolicy - MPNN Config")
+        group = parser.add_argument_group("gnn_policy")
+
+        group.add_argument(
+            "--embedding_size",
+            default=64,
+            type=int,
+            help="Size of all embeddings (node, edge, etc.)",
+        )
         group.add_argument(
             "--cons_nfeats",
             default=4,
@@ -98,10 +104,10 @@ class GNNPolicy(torch.nn.Module):
         )
 
         # Message‑passing layers
-        self.conv_v_to_c = BipartiteGraphConvolution(args)
-        self.conv_c_to_v = BipartiteGraphConvolution(args)
-        self.conv_v_to_c2 = BipartiteGraphConvolution(args)
-        self.conv_c_to_v2 = BipartiteGraphConvolution(args)
+        self.conv_v_to_c = BipartiteGraphConvolution(args.embedding_size)
+        self.conv_c_to_v = BipartiteGraphConvolution(args.embedding_size)
+        self.conv_v_to_c2 = BipartiteGraphConvolution(args.embedding_size)
+        self.conv_c_to_v2 = BipartiteGraphConvolution(args.embedding_size)
 
         # Output module
         self.output_module = torch.nn.Sequential(
@@ -187,47 +193,31 @@ class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
     to provide the exact form of the messages being passed.
     """
 
-    @staticmethod
-    def add_args(parser):
-        group = parser.add_argument_group("BipartiteGraphConvolution - MPNN Config")
-        # The embedding size is the size of the node embeddings
-        group.add_argument(
-            "--embedding_size", default=64, type=int, help="Size of the node embeddings"
-        )
-
-    @staticmethod
-    def name(args):
-        name = "bipartite_graph_convolution"
-        name += f"-embedding_size={args.embedding_size}"
-        return name
-
-    def __init__(self, args):
+    def __init__(self, embedding_size: int):
         super().__init__("add")
 
         self.feature_module_left = torch.nn.Sequential(
-            torch.nn.Linear(args.embedding_size, args.embedding_size)
+            torch.nn.Linear(embedding_size, embedding_size)
         )
         self.feature_module_edge = torch.nn.Sequential(
-            torch.nn.Linear(args.embedding_size, args.embedding_size, bias=False)
+            torch.nn.Linear(embedding_size, embedding_size, bias=False)
         )
         self.feature_module_right = torch.nn.Sequential(
-            torch.nn.Linear(args.embedding_size, args.embedding_size, bias=False)
+            torch.nn.Linear(embedding_size, embedding_size, bias=False)
         )
         self.feature_module_final = torch.nn.Sequential(
-            torch.nn.LayerNorm(args.embedding_size),
+            torch.nn.LayerNorm(embedding_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(args.embedding_size, args.embedding_size),
+            torch.nn.Linear(embedding_size, embedding_size),
         )
 
-        self.post_conv_module = torch.nn.Sequential(
-            torch.nn.LayerNorm(args.embedding_size)
-        )
+        self.post_conv_module = torch.nn.Sequential(torch.nn.LayerNorm(embedding_size))
 
         # output_layers
         self.output_module = torch.nn.Sequential(
-            torch.nn.Linear(2 * args.embedding_size, args.embedding_size),
+            torch.nn.Linear(2 * embedding_size, embedding_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(args.embedding_size, args.embedding_size),
+            torch.nn.Linear(embedding_size, embedding_size),
         )
 
     def forward(self, left_features, edge_indices, edge_features, right_features):

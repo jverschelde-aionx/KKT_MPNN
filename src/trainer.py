@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import configargparse
 import numpy as np
@@ -34,6 +34,37 @@ from models.policy_encoder import (
 )
 
 MAX_HISTOGRAM_SAMPLES = 200_000  # cap histogram payload size
+
+
+def _is_better(val, best, min_delta=0.0):
+    return (best - val) > min_delta
+
+
+def _apply_overrides(args, overrides: Mapping) -> None:
+    """
+    Apply hyperparameter sweep overrides to argparse namespace in-place.
+    We accept {training: {...}, model: {...}, transformer: {...}} and/or flat keys.
+    """
+    if not overrides:
+        return
+
+    # 1) flat keys (top-level)
+    for k, v in overrides.items():
+        if k in ("training", "model", "transformer"):
+            continue
+        if hasattr(args, k):
+            setattr(args, k, v)
+
+    # 2) nested sections
+    for section in ("model", "training", "transformer"):
+        block = overrides.get(section, {})
+        if not isinstance(block, Mapping):
+            continue
+        for k, v in block.items():
+            # map nested key → argparse attribute (last token)
+            attr = k
+            if hasattr(args, attr):
+                setattr(args, attr, v)
 
 
 def compute_percentiles(
@@ -945,7 +976,7 @@ def eval_epoch(
     return total_loss / n_batches, avg_metrics
 
 
-def train():
+def train(overrides: Optional[Mapping] = None):
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
         description="[KKT] Train GNN-Transformer",
@@ -958,28 +989,10 @@ def train():
     # Add GNNTransformer specific arguments
     GNNTransformer.add_args(parser)
 
-    # Model
-    m = parser.add_argument_group("model")
-    m.add_argument("--graph_pooling", type=str, default="mean")
-    m.add_argument("--gnn_type", type=str, default="gcn")
-    m.add_argument("--gnn_virtual_node", action="store_true")
-    m.add_argument("--gnn_dropout", type=float, default=0.0)
-    m.add_argument("--gnn_num_layer", type=int, default=5)
-    m.add_argument("--gnn_emb_dim", type=int, default=300)
-    m.add_argument("--gnn_JK", type=str, default="last")
-    m.add_argument("--gnn_residual", action="store_true")
-    m.add_argument(
-        "--max_seq_len",
-        type=int,
-        default=None,
-        help="maximum sequence length to predict (default: None)",
-    )
-
     # Training
     t = parser.add_argument_group("training")
     t.add_argument("--devices", type=str, default="0")
     t.add_argument("--batch_size", type=int, default=4)
-    t.add_argument("--eval_batch_size", type=int, default=4)
     t.add_argument("--epochs", type=int, default=30)
     t.add_argument("--num_workers", type=int, default=0)
     t.add_argument("--lr", type=float, default=1e-3)
@@ -998,6 +1011,7 @@ def train():
     t.add_argument("--kkt_w_dual", type=float, default=0.1)
     t.add_argument("--kkt_w_station", type=float, default=0.6)
     t.add_argument("--kkt_w_comp", type=float, default=0.2)
+    t.add_argument("--max_lr", type=float, default=0.001)
     t.add_argument(
         "--log_every",
         type=int,
@@ -1025,6 +1039,40 @@ def train():
         "--stop_on_nonfinite",
         action="store_true",
         help="Raise immediately if a non‑finite loss is observed.",
+    )
+    t.add_argument(
+        "--early_stop",
+        action="store_true",
+        help="Enable epoch-level early stopping on valid/loss",
+    )
+    t.add_argument(
+        "--es_patience",
+        type=int,
+        default=4,
+        help="#epochs without improvement before stopping",
+    )
+    t.add_argument(
+        "--es_min_delta",
+        type=float,
+        default=6,
+        help="Minimum absolute improvement to reset patience",
+    )
+    t.add_argument(
+        "--es_min_epochs",
+        type=int,
+        default=3,
+        help="Do not consider early stop before this epoch",
+    )
+    t.add_argument(
+        "--es_cooldown",
+        type=int,
+        default=1,
+        help="#epochs to wait after an improvement before counting patience",
+    )
+    t.add_argument(
+        "--es_restore_best",
+        action="store_true",
+        help="Load best.pt weights into the model on early stop",
     )
 
     # Data
@@ -1077,7 +1125,10 @@ def train():
         help="Number of parallel jobs for data generation",
     )
 
-    args, _ = parser.parse_known_args()
+    args, unkown = parser.parse_known_args()
+
+    if overrides is not None:
+        _apply_overrides(args, overrides)
 
     # Ensure reproducibility
     if args.seed is not None:
@@ -1094,13 +1145,14 @@ def train():
 
     # Initialize wandb
     run_name = (
-        f"{'-'.join(args.problems)}"
-        f"+GNNT={args.gnn_type}"
-        f"+emb={args.gnn_emb_dim}"
-        f"+lr={args.lr}"
-        f"+{datetime.now().strftime('%m%d-%H%M%S')}"
+        "kkt_"
+        + datetime.now().strftime("%Y%m%d_%H%M%S")
+        + GNNTransformer._get_name(args)
+        + GNNPolicy._get_name(args)
     )
-    wandb.init(project="kkt_transformer", name=run_name, config=vars(args))
+
+    if wandb.run is None:
+        wandb.init(project="kkt_transformer", name=run_name, config=vars(args))
 
     wandb.define_metric("training/step")
     wandb.define_metric("*", step_metric="training/step")
@@ -1121,8 +1173,6 @@ def train():
     train_data = GraphDataset(train_files)
     valid_data = GraphDataset(valid_files)
 
-    eval_bs = args.batch_size if args.eval_batch_size is None else args.eval_batch_size
-
     train_loader = DataLoader(
         train_data,
         batch_size=args.batch_size,
@@ -1132,7 +1182,7 @@ def train():
     )
     valid_loader = DataLoader(
         valid_data,
-        batch_size=eval_bs,
+        batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=collate,
@@ -1143,9 +1193,6 @@ def train():
         iter(valid_loader)
     )
     m, n = m_sizes[0], n_sizes[0]
-    args.cons_nfeats = batch_graph.constraint_features.size(1)
-    args.var_nfeats = batch_graph.variable_features.size(1)
-    args.edge_nfeats = batch_graph.edge_attr.size(1)
 
     # Model, loss, optimiser, scheduler
     node_encoder = PolicyEncoder(args)
@@ -1183,7 +1230,7 @@ def train():
     elif args.scheduler == "onecycle":
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=args.lr,
+            max_lr=(args.max_lr or args.lr),
             epochs=args.epochs,
             steps_per_epoch=len(train_loader),
             pct_start=args.pct_start,
@@ -1195,6 +1242,9 @@ def train():
     save_dir = Path("exps") / run_name
     save_dir.mkdir(parents=True, exist_ok=True)
     best_val = float("inf")
+    best_epoch = 0
+    epochs_since_improve = 0
+    cooldown_left = 0
 
     logger.info(f"train size: {len(train_data)} | valid size: {len(valid_data)}")
     wandb.log({"data/train_size": len(train_data), "data/valid_size": len(valid_data)})
@@ -1203,6 +1253,7 @@ def train():
     global_step = 0
     for epoch in range(1, args.epochs + 1):
         model.epoch_callback(epoch)
+
         train_loss, global_step = train_epoch(
             model=model,
             loader=train_loader,
@@ -1257,10 +1308,26 @@ def train():
         }
         torch.save(ckpt, save_dir / "last.pt")
 
-        if val_loss < best_val:
-            best_val = val_loss
+        # track best
+        improved = _is_better(val_loss, best_val, args.es_min_delta)
+        if improved:
+            best_val = float(val_loss)
+            best_epoch = epoch
+            epochs_since_improve = 0
+            cooldown_left = args.es_cooldown
             torch.save(ckpt, save_dir / "best.pt")
             wandb.run.summary["best_val_loss"] = best_val
+            wandb.run.summary["best_epoch"] = best_epoch
+        else:
+            if cooldown_left > 0:
+                cooldown_left -= 1
+            else:
+                epochs_since_improve += 1
+
+        # if val_loss < best_val:
+        #     best_val = val_loss
+        #     torch.save(ckpt, save_dir / "best.pt")
+        #     wandb.run.summary["best_val_loss"] = best_val
 
         logger.info(
             "Epoch {:03d} | train {:.4f} | valid {:.4f} (best {:.4f})",
@@ -1269,7 +1336,28 @@ def train():
             val_loss,
             best_val,
         )
+        # ---- early stopping check ----
+        if (
+            args.early_stop
+            and epoch >= args.es_min_epochs
+            and epochs_since_improve >= args.es_patience
+        ):
+            logger.info(
+                "Early stopping at epoch {:03d} (no improvement for {} epochs). Best {:.4f} @ {:03d}",
+                epoch,
+                epochs_since_improve,
+                best_val,
+                best_epoch,
+            )
+            wandb.run.summary["early_stopped"] = True
+            wandb.run.summary["early_stop_epoch"] = epoch
 
+            if args.es_restore_best and (save_dir / "best.pt").exists():
+                state = torch.load(save_dir / "best.pt", map_location=device)
+                model.load_state_dict(state["model"])
+                logger.info("Restored model weights from best.pt")
+
+            break  # exit training loop
     logger.info("Finished training. Best validation loss = {:.4f}", best_val)
 
 

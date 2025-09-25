@@ -25,6 +25,17 @@ class TransformerNodeEncoder(nn.Module):
             "--transformer_norm_input", action="store_true", default=False
         )
 
+    @staticmethod
+    def name(args):
+        name = f"-d={args.d_model}"
+        name = f"-heads={args.nhead}"
+        name = f"-d_ff={args.dim_feedforward}"
+        name += f"-tdrop={args.transformer_dropout}"
+        name += f"-act={args.transformer_activation}"
+        name += f"-enc_layer={args.num_encoder_layers}"
+        name += "-norm_input" if args.transformer_norm_input else ""
+        return name
+
     def __init__(self, args):
         super().__init__()
 
@@ -47,10 +58,6 @@ class TransformerNodeEncoder(nn.Module):
         if args.transformer_norm_input:
             self.norm_input = nn.LayerNorm(args.d_model)
         self.cls_embedding = None
-        if args.graph_pooling == "cls":
-            self.cls_embedding = nn.Parameter(
-                torch.randn([1, 1, args.d_model], requires_grad=True)
-            )
 
     def forward(self, padded_h_node, src_padding_mask):
         """

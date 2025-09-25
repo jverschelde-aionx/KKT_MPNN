@@ -4,9 +4,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from graphtrans.modules.gnn_module import GNNNodeEmbedding
 from loguru import logger
 
-from graphtrans.modules.gnn_module import GNNNodeEmbedding
 from graphtrans.modules.masked_transformer_encoder import MaskedOnlyTransformerEncoder
 from graphtrans.modules.transformer_encoder import TransformerNodeEncoder
 from graphtrans.modules.utils import pad_batch

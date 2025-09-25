@@ -1,10 +1,12 @@
 data:
-  problems: ["IS","CA"]
-  is_sizes: [10,50]
-  ca_sizes: [10,50]
+  problems: ["IS","CA", "CFL","SC"]
+  is_sizes: [10,50,100]
+  ca_sizes: [10,50,100]
+  sc_sizes: [10,50,100]
+  cfl_sizes: [10,50,100]
   test_split: 0.15
   val_split: 0.15
-  n_instances: 10000
+  n_instances: 7000
   data_root: ../data
   solve: true
   gurobi_threads: 4
@@ -16,16 +18,8 @@ data:
   add_pos_feat: true
   norm_pos_feat: false
 
-model:
-  graph_pooling: mean
-  gnn_type: gcn
-  gnn_virtual_node: true
-  gnn_dropout: 0.1
-  gnn_num_layer: 5
-  gnn_emb_dim: 300
-  gnn_JK: last
-  gnn_residual: false
-  # GNNPolicy specific parameters
+# GNNPolicy specific parameters
+gnn_policy:
   embedding_size: 128
   cons_nfeats: 4
   edge_nfeats: 1
@@ -33,35 +27,30 @@ model:
   num_emb_type: periodic
   num_emb_bins: 32
   num_emb_freqs: 16
-  # Additional model parameters
-  model_type: "gnn"
-  pos_encoder: false
-  graph_input_dim: null
 
 # Transformer architecture parameters
 transformer:
   d_model: 128
   nhead: 4
   dim_feedforward: 256
-  transformer_dropout: 0.1
+  transformer_dropout: 0.2
   transformer_activation: "relu"
   num_encoder_layers: 4
   transformer_norm_input: true
   num_encoder_layers_masked: 0
   transformer_prenorm: true
   pos_encoder: true
-
+  type_emb: true
 
 training:
   devices: "0"
   batch_size: 32
-  eval_batch_size: 32
-  epochs: 50
+  epochs: 20
   num_workers: 0
   lr: 0.0005
   weight_decay: 0.01
-  scheduler: cosine
-  pct_start: 0.05
+  scheduler: onecycle
+  pct_start: 0.15
   grad_clip: 1.0
   amp: false
   seed: 42
@@ -70,7 +59,15 @@ training:
   kkt_w_station: 0.6
   kkt_w_comp: 0.2
   max_lr: 0.001
-  runs: 10
-  test_freq: 1
-  start_eval: 15
-  resume: null
+  log_every: 50
+  histogram_every: 2000
+  parameter_stats_every: 500
+  save_nonfinite_artifacts: true
+  stop_on_nonfinite: true
+  early_stop: true
+  es_patience: 3
+  es_min_delta: 6
+  es_min_epochs: 2
+  es_cooldown: 1
+  es_restore_best: true
+

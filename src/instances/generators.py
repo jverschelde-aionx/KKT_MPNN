@@ -1,16 +1,21 @@
-import math
 import multiprocessing as mp
 import pickle
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from math import pow
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import gurobipy as gp
 import numpy as np
 import pyscipopt as scp
 import torch
 import tqdm
-from ecole.instance import CombinatorialAuctionGenerator, IndependentSetGenerator
+from ecole.instance import (
+    CapacitatedFacilityLocationGenerator,
+    CombinatorialAuctionGenerator,
+    IndependentSetGenerator,
+    SetCoverGenerator,
+)
 from loguru import logger
 
 from instances.common import (
@@ -21,6 +26,81 @@ from instances.common import (
     VariableFeature,
 )
 from instances.utils import ensure_dirs
+
+
+@dataclass
+class CFLSize:
+    n_customers: int
+    n_facilities: int
+    variables: int
+    constraints: int
+
+
+def factor_pairs_for_vars(V: int) -> List[Tuple[int, int]]:
+    """
+    Return all (n_facilities, n_customers) pairs s.t.
+    n_facilities * (n_customers + 1) = V
+    """
+    pairs = []
+    for d in range(1, V + 1):
+        if V % d == 0:
+            n_fac = d
+            n_cust_plus_1 = V // d
+            n_cust = n_cust_plus_1 - 1
+            if n_cust >= 1:  # need at least 1 customer
+                pairs.append((n_fac, n_cust))
+    return pairs
+
+
+def pick_cfl_shape(
+    var_target: int,
+    cons_target: Optional[int] = None,
+    min_facilities: int = 2,  # avoid trivial single-facility by default
+    max_facilities: Optional[int] = None,
+) -> CFLSize:
+    """
+    Pick (n_facilities, n_customers) to match a desired total variable count.
+    If cons_target is given, pick the pair that gets constraints (n_f + n_c)
+    closest to it.
+    """
+    candidates = [
+        (nf, nc)
+        for (nf, nc) in factor_pairs_for_vars(var_target)
+        if nf >= min_facilities and (max_facilities is None or nf <= max_facilities)
+    ] or factor_pairs_for_vars(var_target)  # fallback if filter too strict
+
+    if not candidates:
+        raise ValueError("No valid (n_facilities, n_customers) pairs found.")
+
+    if cons_target is None:
+        # heuristic: prefer more than one facility, and keep counts balanced-ish
+        # score = penalize |nf - nc|
+        def score(pair):
+            nf, nc = pair
+            return abs(nf - nc)
+
+        nf, nc = min(candidates, key=score)
+    else:
+        # pick closest to desired constraints
+        def score(pair):
+            nf, nc = pair
+            return abs((nf + nc) - cons_target)
+
+        nf, nc = min(candidates, key=score)
+
+    return CFLSize(
+        n_customers=nc, n_facilities=nf, variables=nf * (nc + 1), constraints=nf + nc
+    )
+
+
+def _scaled_density(n_rows: int, n_cols: int, k: int = 7, eps: float = None) -> float:
+    if eps is not None:
+        d1 = 1 - pow(eps, 1.0 / n_cols)
+        d2 = 1 - pow(eps, 1.0 / n_rows)
+        d = max(d1, d2)
+    else:
+        d = max(k / n_cols, k / n_rows)
+    return min(max(d, 0.01), 0.95)
 
 
 # instance-wise min–max normalization for features
@@ -96,6 +176,72 @@ def generate_CA_instances(
             lp_paths.append(lp_path)
 
 
+def generate_SC_instances(
+    settings: Settings, split: str, n_instances: int, lp_paths: List[Path]
+) -> None:
+    """Generate Set Cover instances."""
+    for size in settings.sc_sizes:
+        inst_dir, _ = ensure_dirs(
+            settings.data_root, ProblemClass.SET_COVER, size, split
+        )
+        density = _scaled_density(size, size, k=7)
+        for i in tqdm.trange(
+            n_instances, desc=f"Generating {size} Set Cover instances"
+        ):
+            name = f"{ProblemClass.SET_COVER}-{size}-{i:04}.lp"
+            lp_path = inst_dir / name
+            if lp_path.exists():
+                lp_paths.append(lp_path)
+                continue
+
+            gen = SetCoverGenerator(
+                n_rows=size,
+                n_cols=size,
+                density=density,
+                max_coef=100,
+            )
+
+            next(gen).write_problem(str(lp_path))
+            lp_paths.append(lp_path)
+
+
+def generate_CFL_instances(
+    settings: Settings, split: str, n_instances: int, lp_paths: List[Path]
+) -> None:
+    """Generate Capacitated Facility Location instances."""
+    for size in settings.cfl_sizes:
+        inst_dir, _ = ensure_dirs(
+            settings.data_root,
+            ProblemClass.CAPACITATED_FACILITY_LOCATION,
+            size,
+            split,
+        )
+
+        cfg = pick_cfl_shape(
+            var_target=size, cons_target=int(size / 2), min_facilities=2
+        )
+
+        for i in tqdm.trange(
+            n_instances,
+            desc=f"Generating {size} Capacitated Facility Location instances",
+        ):
+            name = f"{ProblemClass.CAPACITATED_FACILITY_LOCATION}-{size}-{i:04}.lp"
+            lp_path = inst_dir / name
+            if lp_path.exists():
+                lp_paths.append(lp_path)
+                continue
+
+            gen = CapacitatedFacilityLocationGenerator(
+                n_customers=cfg.n_customers,
+                n_facilities=cfg.n_facilities,
+                continuous_assignment=False,
+                ratio=1.2,
+            )
+
+            next(gen).write_problem(str(lp_path))
+            lp_paths.append(lp_path)
+
+
 def solve_instance(
     settings: Settings, lp_path: Path, solution_path: Path, log_dir: Path
 ) -> None:
@@ -150,6 +296,10 @@ def generate_instances(settings: Settings) -> None:
                 generate_IS_instances(settings, split, n_instances, lp_paths)
             elif problem == ProblemClass.COMBINATORIAL_AUCTION:
                 generate_CA_instances(settings, split, n_instances, lp_paths)
+            elif problem == ProblemClass.SET_COVER:
+                generate_SC_instances(settings, split, n_instances, lp_paths)
+            elif problem == ProblemClass.CAPACITATED_FACILITY_LOCATION:
+                generate_CFL_instances(settings, split, n_instances, lp_paths)
             else:
                 raise ValueError(f"Unknown problem type: {problem}")
 
@@ -179,7 +329,11 @@ def generate_instances(settings: Settings) -> None:
                     and not solution_path.exists()
                     and split in ["val", "test"]
                 ):
-                    solve_instance(settings, lp_path, solution_path, log_dir)
+                    try:
+                        solve_instance(settings, lp_path, solution_path, log_dir)
+                    except Exception as e:
+                        logger.error("Failed to solve {} – {}", lp_path, e)
+                        continue
 
                 bg_path = bg_dir / (lp_path.name + ".bg")
                 if not bg_path.exists():
