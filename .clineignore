@@ -1,6 +1,0 @@
-__pycache__/
-wandb/
-# Datasets
-src/MPNN/dataset/*
-.venv/
-exps/

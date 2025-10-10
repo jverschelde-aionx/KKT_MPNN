@@ -7,3 +7,4 @@ src/MPNN/instance/test/*
 src/MPNN/dataset/
 data/
 exps/
+src/outputs/
