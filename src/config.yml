@@ -1,9 +1,9 @@
 data:
-  problems: ["IS","CA", "CFL","SC"]
-  is_sizes: [10,50,100]
-  ca_sizes: [10,50,100]
-  sc_sizes: [10,50,100]
-  cfl_sizes: [10,50,100]
+  problems: ["IS"]
+  is_sizes: [10,50]
+  ca_sizes: [10,50]
+  sc_sizes: [10,50]
+  cfl_sizes: [10,50]
   test_split: 0.15
   val_split: 0.15
   n_instances: 7000
@@ -27,47 +27,52 @@ gnn_policy:
   num_emb_type: periodic
   num_emb_bins: 32
   num_emb_freqs: 16
-
 # Transformer architecture parameters
 transformer:
   d_model: 128
-  nhead: 4
-  dim_feedforward: 256
-  transformer_dropout: 0.2
+  nhead: 8
+  dim_feedforward: 1024
+  transformer_dropout: 0.4237401880161013
   transformer_activation: "relu"
-  num_encoder_layers: 4
+  num_encoder_layers: 3
   transformer_norm_input: true
   num_encoder_layers_masked: 0
   transformer_prenorm: true
-  pos_encoder: true
+  pos_encoder: false
   type_emb: true
 
 training:
   devices: "0"
-  batch_size: 32
-  epochs: 20
+  batch_size: 64
+  epochs: 100
   num_workers: 0
-  lr: 0.0005
-  weight_decay: 0.01
+  lr: 0.0003
+  weight_decay: 1.0133573090191872
   scheduler: onecycle
   pct_start: 0.15
-  grad_clip: 1.0
+  grad_clip: 100
   amp: false
   seed: 42
-  kkt_w_primal: 0.1
-  kkt_w_dual: 0.1
-  kkt_w_station: 0.6
-  kkt_w_comp: 0.2
+  kkt_w_primal: 1
+  kkt_w_dual: 1
+  kkt_w_station: 1
+  kkt_w_comp: 1
   max_lr: 0.001
   log_every: 50
-  histogram_every: 2000
-  parameter_stats_every: 500
-  save_nonfinite_artifacts: true
-  stop_on_nonfinite: true
-  early_stop: true
+  early_stop: false
   es_patience: 3
   es_min_delta: 6
   es_min_epochs: 2
   es_cooldown: 1
   es_restore_best: true
+  es_explosion_factor: 20.0
 
+testing:
+  ckpt: exps/kkt_20251005_111401NamespaceNamespace/best.pt
+  bg_path: ../data/IS/BG/test/50/IS-50-0012.lp.bg
+  split: test
+  out_dir: outputs
+  device: "0"
+  max_points: 50000
+  tsne: true
+  topk: 40

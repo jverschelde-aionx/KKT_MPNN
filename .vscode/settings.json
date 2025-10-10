@@ -1,6 +1,5 @@
 {
     "editor.formatOnSave": true,
-    "chat.mcp.enabled": true,
     "[python]": {
         "editor.defaultFormatter": "charliermarsh.ruff",
         "editor.formatOnSave": true,
@@ -8,5 +7,6 @@
             "source.organizeImports.ruff": "explicit"
         }
     },
-    "ruff.organizeImports": true
+    "ruff.organizeImports": true,
+    "chat.mcp.access": "all"
 }

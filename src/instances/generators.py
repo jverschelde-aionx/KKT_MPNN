@@ -124,6 +124,35 @@ def _constraint_sense_code(problem, constraint) -> Tuple[int, float]:
     return 1, lhs  # >=
 
 
+def force_minimize_lp_inplace(lp_path: Path) -> bool:
+    """
+    Open an LP file, and if it is a maximization, negate the linear objective
+    and switch model sense to minimization. Rewrites the LP in place.
+    Returns True if a flip was performed, else False.
+
+    NOTE: This handles linear objectives (LP). If you later introduce quadratic
+    terms, you must also negate the Q part of the objective.
+    """
+    m = gp.read(str(lp_path))
+    try:
+        if m.ModelSense == -1:  # -1 = maximize, +1 = minimize
+            # negate linear objective coefficients
+            for v in m.getVars():
+                v.Obj = -v.Obj
+
+            # switch the sense to minimize
+            m.ModelSense = 1
+            m.update()
+            # overwrite the original LP file
+            m.write(str(lp_path))
+            logger.info(f"[flip->min] Rewrote objective for {lp_path.name}")
+            return True
+        else:
+            return False
+    finally:
+        m.dispose()
+
+
 def generate_IS_instances(
     settings: Settings, split: str, n_instances: int, lp_paths: List[Path]
 ) -> None:
@@ -148,6 +177,7 @@ def generate_IS_instances(
                 graph_type="barabasi_albert",
             )
             next(gen).write_problem(str(lp_path))
+            force_minimize_lp_inplace(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -173,6 +203,7 @@ def generate_CA_instances(
             )
 
             next(gen).write_problem(str(lp_path))
+            force_minimize_lp_inplace(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -202,6 +233,7 @@ def generate_SC_instances(
             )
 
             next(gen).write_problem(str(lp_path))
+            force_minimize_lp_inplace(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -239,6 +271,7 @@ def generate_CFL_instances(
             )
 
             next(gen).write_problem(str(lp_path))
+            force_minimize_lp_inplace(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -433,24 +466,14 @@ def get_bipartite_graph(
             v_feats[constraint_idx, VariableFeature.IS_INTEGER] = 1.0
             b_idx.append(constraint_idx)
 
-    # objective (flip to min if needed)
-    c_raw = np.zeros(n_variables, dtype=np.float32)
+    c_vec = np.zeros(n_variables, dtype=np.float32)
     obj = problem.getObjective()
     for term in obj:
         var = term.vartuple[0]
         variable_idx = v_map[var.name]
         coef = float(obj[term])
-        c_raw[variable_idx] += coef
-        v_feats[variable_idx, VariableFeature.OBJ_COEF] = (
-            coef  # raw obj coef as feature
-        )
-
-    # detect sense
-    try:
-        sense_min = problem.getObjectiveSense().lower().startswith("min")
-    except Exception:
-        sense_min = True
-    c_vec = torch.tensor(c_raw if sense_min else -c_raw, dtype=torch.float32)
+        c_vec[variable_idx] += coef
+        v_feats[variable_idx, VariableFeature.OBJ_COEF] = coef
 
     # original constraints
     conss_all = [c for c in problem.getConss() if len(problem.getValsLinear(c)) > 0]
