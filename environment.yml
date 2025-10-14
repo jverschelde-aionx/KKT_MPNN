@@ -38,6 +38,7 @@ dependencies:
   - chardet
   - idna
   - isodate
+  - cvxpy
   - markupsafe
   - python-dateutil
   - pytz

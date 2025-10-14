@@ -11,8 +11,8 @@ from pathlib import Path
 import configargparse
 import torch
 
-from instances.common import ProblemClass, Settings
-from instances.generators import generate_instances
+from data.common import ProblemClass, Settings
+from data.generators import generate_instances
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -60,6 +60,12 @@ def generate() -> None:
         default=[10, 50, 100, 200, 500, 1000],
     )
     d.add_argument(
+        "--rnd_sizes",
+        type=int,
+        nargs="+",
+        default=[2, 5, 10, 50, 100, 200],
+    )
+    d.add_argument(
         "--n_instances", type=int, default=1000, help="Number of instances per size"
     )
     d.add_argument(
@@ -104,6 +110,7 @@ def generate() -> None:
         ca_sizes=tuple(args.ca_sizes),
         sc_sizes=tuple(args.sc_sizes),
         cfl_sizes=tuple(args.cfl_sizes),
+        rnd_sizes=tuple(args.rnd_sizes),
         test_split=args.test_split,
         val_split=args.val_split,
         add_positional_features=args.add_pos_feat,

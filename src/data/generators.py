@@ -5,6 +5,7 @@ from math import pow
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import cvxpy as cp
 import gurobipy as gp
 import numpy as np
 import pyscipopt as scp
@@ -18,14 +19,14 @@ from ecole.instance import (
 )
 from loguru import logger
 
-from instances.common import (
+from data.common import (
     ConstraintFeature,
     EdgeFeature,
     ProblemClass,
     Settings,
     VariableFeature,
 )
-from instances.utils import ensure_dirs
+from data.utils import ensure_dirs
 
 
 @dataclass
@@ -275,6 +276,65 @@ def generate_CFL_instances(
             lp_paths.append(lp_path)
 
 
+def generate_random_instances(
+    settings: Settings, split: str, n_instances: int, lp_paths: List[Path]
+) -> None:
+    for size in settings.rnd_sizes:
+        inst_dir, _ = ensure_dirs(
+            settings.data_root,
+            ProblemClass.RANDOM_LP,
+            size,
+            split,
+        )
+
+        optimal_count = 0
+        logger.info(f"Generating {n_instances} random LP instances of size {size}")
+        while optimal_count < n_instances:
+            name = f"{ProblemClass.RANDOM_LP}-{size}-{optimal_count:04}.lp"
+            lp_path = inst_dir / name
+            if lp_path.exists():
+                lp_paths.append(lp_path)
+                continue
+            c1 = np.random.uniform(-3, 3, size)
+            A1 = np.random.uniform(-3, 3, (size, size))
+            b1 = np.random.uniform(-3, 3, size)
+
+            max_value = max(np.max(np.abs(c1)), np.max(np.abs(A1)), np.max(np.abs(b1)))
+
+            # Normalize A, b, and c by dividing by the max value
+            c = c1 / max_value
+            A = A1 / max_value
+            b = b1 / max_value
+
+            x = cp.Variable(size)
+
+            # Define the LP problem
+            objective = cp.Minimize(c.T @ x)
+            constraints = [A @ x <= b]
+
+            # Create and solve the problem
+            problem = cp.Problem(objective, constraints)
+
+            try:
+                # Solve the problem
+                problem.solve()
+                # Check if the problem is solvable and optimal
+                if problem.status == cp.OPTIMAL:
+                    # write the problem to lp file
+                    problem.solve(solver=cp.GUROBI, save_file=str(lp_path))
+                    optimal_count += 1
+
+                    if optimal_count % 100 == 0:
+                        logger.info(f"Generated {optimal_count} optimal instances")
+
+                    force_minimize_lp_inplace(lp_path)
+                    lp_paths.append(lp_path)
+                    logger.info(f"Generated optimal instance: {lp_path.name}")
+
+            except cp.SolverError:
+                logger.info("Problem is not solvable, discarding.")
+
+
 def solve_instance(
     settings: Settings, lp_path: Path, solution_path: Path, log_dir: Path
 ) -> None:
@@ -333,6 +393,8 @@ def generate_instances(settings: Settings) -> None:
                 generate_SC_instances(settings, split, n_instances, lp_paths)
             elif problem == ProblemClass.CAPACITATED_FACILITY_LOCATION:
                 generate_CFL_instances(settings, split, n_instances, lp_paths)
+            elif problem == ProblemClass.RANDOM_LP:
+                generate_random_instances(settings, split, n_instances, lp_paths)
             else:
                 raise ValueError(f"Unknown problem type: {problem}")
 

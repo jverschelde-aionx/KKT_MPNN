@@ -5,6 +5,6 @@ wandb/
 src/MPNN/instance/train/*
 src/MPNN/instance/test/*
 src/MPNN/dataset/
-data/
+src/data/instances
 exps/
 src/outputs/
