@@ -6,11 +6,12 @@ from typing import Tuple
 
 @dataclass(frozen=True)
 class Settings:
-    problems: Tuple[str, ...]  # ('IS','CA', 'SC', 'CFL')
+    problems: Tuple[str, ...]  # ('IS','CA', 'SC', 'CFL','RND')
     is_sizes: Tuple[int, ...]
     ca_sizes: Tuple[int, ...]
     sc_sizes: Tuple[int, ...]
     cfl_sizes: Tuple[int, ...]
+    rnd_sizes: Tuple[int, ...]
     n_instances: int = 1000
     data_root: Path = Path("../data")
     test_split: float = 0.15
@@ -36,6 +37,7 @@ class ProblemClass:
     COMBINATORIAL_AUCTION = "CA"
     SET_COVER = "SC"
     CAPACITATED_FACILITY_LOCATION = "CFL"
+    RANDOM_LP = "RND"
 
 
 class VariableFeature:
@@ -56,3 +58,8 @@ class ConstraintFeature:
 
 class EdgeFeature:
     COEF = 0
+
+
+SCIP_INF = 1e20
+VARS_PAD = 18
+CONS_PAD = 4

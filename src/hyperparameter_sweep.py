@@ -1,7 +1,8 @@
 from typing import Mapping
 
 import wandb
-from trainer import train
+
+from trainer_old import train
 
 
 def _wandb_config_to_dict(cfg) -> dict:
