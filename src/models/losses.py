@@ -39,6 +39,7 @@ def get_complementary_slackness(
     complementary_slackness = ((complementary_slackness**2) * mask_m).sum(
         dim=1
     ) / mask_m.sum(dim=1).clamp_min(1.0)
+    return complementary_slackness
 
 
 def get_stationarity(
@@ -54,6 +55,7 @@ def get_stationarity(
     stationarity = ((stationarity**2) * mask_n).sum(dim=1) / mask_n.sum(
         dim=1
     ).clamp_min(1.0)
+    return stationarity
 
 
 def kkt_loss(
@@ -78,16 +80,21 @@ def kkt_loss(
 
     primal_feasibility = get_primal_feasibility(x_pred, A, b, mask_m)
     dual_feasibility = get_dual_feasibility(lambda_pred, mask_m)
-    stationarity = get_stationarity(lambda_pred, A, c, mask_m)
+    stationarity = get_stationarity(lambda_pred, A, c, mask_n)
     complementary_slackness = get_complementary_slackness(
         x_pred, lambda_pred, A, b, mask_m
     )
 
-    kkt = (
-        primal_weight * primal_feasibility
-        + dual_weight * dual_feasibility
-        + stationarity_weight * stationarity
-        + complementary_slackness_weight * complementary_slackness
-    ).mean()
+    weighted_primal = primal_weight * primal_feasibility
+    weighted_dual = dual_weight * dual_feasibility
+    weighted_stat = stationarity_weight * stationarity
+    weighted_comp = complementary_slackness_weight * complementary_slackness
 
-    return kkt
+    loss = (weighted_primal + weighted_dual + weighted_stat + weighted_comp).mean()
+
+    return loss, {
+        "primal_feasibility": weighted_primal.mean(),
+        "dual_feasibility": weighted_dual.mean(),
+        "stationarity": weighted_stat.mean(),
+        "complementary_slackness": weighted_comp.mean(),
+    }

@@ -2,37 +2,58 @@ import os
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import configargparse
 import numpy as np
 import torch
-import wandb
+import torch_geometric
 from loguru import logger
 from torch.utils.data import DataLoader
 
+import wandb
 from data.common import ProblemClass
-from data.datasets import GraphDataset, LPDataset, pad_collate, pad_collate_graphs
+from data.datasets import GraphDataset, LPDataset, make_pad_collate, pad_collate_graphs
 from models.losses import kkt_loss
-from models.models import KKTNetMLP
+from models.models import GNNPolicy, KKTNetMLP
 
 
 class TrainingState:
-    def __init__(self, save_dir: Path):
-        self.step = 0
+    def __init__(self, log_every: int):
+        self.steps = 0
+        self.trained_items = 0
+        self.training_loss_sum = 0.0
         self.epoch = 0
         self.best_epoch = 0
-        self.best_val_loss = np.inf
-        self.save_dir = save_dir
+        self.log_every = log_every
 
-    def increment_epoch(self):
+    def add_training_step(self, loss: float):
+        self._increment_step()
+        if (self.steps % self.log_every) == 0:
+            wandb.log({"train/loss": float(loss)}, step=self.steps)
+
+        self.training_loss_sum += loss
+
+    def finish_epoch(self) -> float:
+        training_loss = self.training_loss_sum / self.trained_items
+        self._reset_training_state()
+        self._increment_epoch()
+        return training_loss
+
+    def _reset_training_state(self):
+        self.trained_items = 0
+        self.training_loss_sum = 0.0
+
+    def _increment_epoch(self):
         self.epoch += 1
 
-    def increment_step(self):
-        self.step += 1
+    def _increment_step(self):
+        self.trained_items += 1
+        self.steps += 1
+        wandb.log({"training/step": self.steps}, step=self.steps)
 
     def get_step(self) -> int:
-        return self.step
+        return self.steps
 
     def get_epoch(self) -> int:
         return self.epoch
@@ -64,14 +85,15 @@ def train(overrides: Optional[Mapping] = None):
         t = parser.add_argument_group("training")
         t.add_argument("--devices", type=str, default="0")
         t.add_argument("--batch_size", type=int, default=4)
-        t.add_argument("--use_bipartite_graphs", action="store_true", default=True)
+        t.add_argument("--use_bipartite_graphs", action="store_true")
         t.add_argument("--epochs", type=int, default=30)
         t.add_argument("--lr", type=float, default=1e-3)
+        t.add_argument("--num_workers", type=int, default=0)
         t.add_argument("--seed", type=int, default=0)
-        t.add_argument("--kkt_w_primal", type=float, default=0.1)
-        t.add_argument("--kkt_w_dual", type=float, default=0.1)
-        t.add_argument("--kkt_w_station", type=float, default=0.6)
-        t.add_argument("--kkt_w_comp", type=float, default=0.2)
+        t.add_argument("--primal_weight", type=float, default=0.1)
+        t.add_argument("--dual_weight", type=float, default=0.1)
+        t.add_argument("--stationarity_weight", type=float, default=0.6)
+        t.add_argument("--complementary_slackness_weight", type=float, default=0.2)
         t.add_argument("--max_lr", type=float, default=0.001)
         t.add_argument(
             "--log_every",
@@ -123,6 +145,8 @@ def train(overrides: Optional[Mapping] = None):
 
         d.add_argument("--data_root", type=str, default="../data")
 
+        GNNPolicy.add_args(parser)
+
         args, _ = parser.parse_known_args()
 
         if overrides is not None:
@@ -153,18 +177,36 @@ def train(overrides: Optional[Mapping] = None):
         wandb.define_metric("*", step_metric="training/step")
 
         # Setup data
-        train_files, valid_files = [], []
+        size_cfg = {
+            "IS": args.is_sizes,
+            "CA": args.ca_sizes,
+            "SC": args.sc_sizes,
+            "CFL": args.cfl_sizes,
+            "RND": args.rnd_sizes,
+        }
 
+        train_files, valid_files = [], []
         for problem in args.problems:
             problem_dir = (
-                Path(args.data_root) / problem / "BG"
-                if args.use_bipartite_graphs
-                else "instance"
+                Path(args.data_root)
+                / problem
+                / ("BG" if args.use_bipartite_graphs else "instance")
             )
-            for size_dir in (problem_dir / "train").iterdir():
-                train_files.extend([str(size_dir / f) for f in os.listdir(size_dir)])
-            for size_dir in (problem_dir / "val").iterdir():
-                valid_files.extend([str(size_dir / f) for f in os.listdir(size_dir)])
+            sizes = size_cfg.get(problem, [])
+            for split, files in (("train", train_files), ("val", valid_files)):
+                split_dir = problem_dir / split
+                if sizes:
+                    for size in sizes:
+                        size_dir = split_dir / str(size)
+                        if not size_dir.exists():
+                            raise ValueError(f"Missing size dir: {size_dir}")
+                        files.extend(
+                            [str(size_dir / file) for file in os.listdir(size_dir)]
+                        )
+                else:
+                    raise ValueError(
+                        f"Should contain at least one problem size for class {problem}"
+                    )
 
         train_files = sorted(train_files)
         valid_files = sorted(valid_files)
@@ -179,59 +221,75 @@ def train(overrides: Optional[Mapping] = None):
             if args.use_bipartite_graphs
             else LPDataset(valid_files)
         )
+        if not args.use_bipartite_graphs:
+            M_max = max(
+                [m for m, _ in train_data.shapes] + [m for m, _ in valid_data.shapes]
+            )
+            N_max = max(
+                [n for _, n in train_data.shapes] + [n for _, n in valid_data.shapes]
+            )
 
         train_loader = DataLoader(
             train_data,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
-            collate_fn=pad_collate_graphs if args.use_bipartite_graphs else pad_collate,
+            collate_fn=pad_collate_graphs
+            if args.use_bipartite_graphs
+            else make_pad_collate(M_fixed=M_max, N_fixed=N_max),
         )
         valid_loader = DataLoader(
             valid_data,
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
-            collate_fn=pad_collate_graphs if args.use_bipartite_graphs else pad_collate,
+            collate_fn=pad_collate_graphs
+            if args.use_bipartite_graphs
+            else make_pad_collate(M_fixed=M_max, N_fixed=N_max),
         )
 
-        (model_input, A, b, c, m_sizes, n_sizes) = next(iter(valid_loader))
-        m, n = m_sizes[0], n_sizes[0]
-
-        model = KKTNetMLP(m, n).to(args.device)
+        model = (
+            GNNPolicy(args).to(device)
+            if args.use_bipartite_graphs
+            else KKTNetMLP(M_max, N_max).to(device)
+        )
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-
-        training_state = TrainingState()
-
-        wandb.watch(model, log="gradients", log_graph=False)
 
         save_dir = Path("exps") / run_name
         save_dir.mkdir(parents=True, exist_ok=True)
+        training_state = TrainingState(log_every=args.log_every)
+
+        wandb.watch(model, log="gradients", log_graph=False)
 
         logger.info(f"train size: {len(train_data)} | valid size: {len(valid_data)}")
         wandb.log(
             {"data/train_size": len(train_data), "data/valid_size": len(valid_data)}
         )
 
+        best_val = np.inf
+
         # Train loop
         for epoch in range(1, args.epochs + 1):
-            model.epoch_callback(epoch)
-
             train_loss = train_epoch(
                 model=model,
                 loader=train_loader,
-                criterion=criterion,
                 optimizer=optimizer,
-                scaler=scaler,
-                grad_clip=args.grad_clip,
-                tensor_device=device,
-                training_step=training_state,
-                log_every=args.log_every,
-                scheduler=scheduler,
+                device=device,
+                training_state=training_state,
+                primal_weight=args.primal_weight,
+                dual_weight=args.dual_weight,
+                stationarity_weight=args.stationarity_weight,
+                complementary_slackness_weight=args.complementary_slackness_weight,
             )
 
             val_loss, validation_metrics = eval_epoch(
-                model, valid_loader, criterion, device, args.amp
+                model,
+                valid_loader,
+                device,
+                primal_weight=args.primal_weight,
+                dual_weight=args.dual_weight,
+                stationarity_weight=args.stationarity_weight,
+                complementary_slackness_weight=args.complementary_slackness_weight,
             )
 
             # logging
@@ -255,44 +313,12 @@ def train(overrides: Optional[Mapping] = None):
             }
             torch.save(ckpt, save_dir / "last.pt")
 
-            # TODO ik zit hier
-            training_state.update(
-                val_loss,
-            )
-            # track best
-            improved = val_loss < best_val
-            if improved:
+            if val_loss < best_val:
                 best_val = float(val_loss)
                 best_epoch = epoch
                 torch.save(ckpt, save_dir / "best.pt")
                 wandb.run.summary["best_val_loss"] = best_val
                 wandb.run.summary["best_epoch"] = best_epoch
-            else:
-                if cooldown_left > 0:
-                    cooldown_left -= 1
-                else:
-                    epochs_since_improve += 1
-
-            # ---- early stopping explosion check ----
-            if (
-                args.early_stop
-                and epoch >= args.es_min_epochs
-                and args.es_explosion_factor
-                and best_val < float("inf")
-            ):
-                if val_loss > args.es_explosion_factor * best_val:
-                    logger.info("Stopping early due to loss explosion")
-                    logger.info(val_loss, best_val)
-
-                    logger.info(
-                        "Early stop due to loss explosion (val {:.4f} > {:.2f}× best {:.4f})",
-                        val_loss,
-                        args.es_explosion_factor,
-                        best_val,
-                    )
-                    wandb.run.summary["early_stopped"] = True
-                    wandb.run.summary["early_stop_epoch"] = epoch
-                    break
 
             logger.info(
                 "Epoch {:03d} | train {:.4f} | valid {:.4f} (best {:.4f})",
@@ -301,74 +327,143 @@ def train(overrides: Optional[Mapping] = None):
                 val_loss,
                 best_val,
             )
-            # ---- early stopping check ----
-            if (
-                args.early_stop
-                and epoch >= args.es_min_epochs
-                and epochs_since_improve >= args.es_patience
-            ):
-                logger.info(
-                    "Early stopping at epoch {:03d} (no improvement for {} epochs). Best {:.4f} @ {:03d}",
-                    epoch,
-                    epochs_since_improve,
-                    best_val,
-                    best_epoch,
-                )
-                wandb.run.summary["early_stopped"] = True
-                wandb.run.summary["early_stop_epoch"] = epoch
 
-                if args.es_restore_best and (save_dir / "best.pt").exists():
-                    state = torch.load(save_dir / "best.pt", map_location=device)
-                    model.load_state_dict(state["model"])
-                    logger.info("Restored model weights from best.pt")
-
-                break  # exit training loop
         logger.info("Finished training. Best validation loss = {:.4f}", best_val)
 
     except Exception as e:
         logger.exception("Exception during training: {}", e)
         raise
     finally:
-        if node_loggers is not None:
-            for node_logger in node_loggers:
-                node_logger.close()
-
         wandb.finish()
 
 
-def train_epoch(model, loader, optimizer, device):
+def pack_by_sizes(flat: torch.Tensor, sizes: List[int], max_size: int) -> torch.Tensor:
+    B = len(sizes)
+    out = flat.new_zeros((B, max_size))
+    cursor = 0
+    for i, sz in enumerate(sizes):
+        out[i, :sz] = flat[cursor : cursor + sz]
+        cursor += sz
+    return out
+
+
+def train_epoch(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: str,
+    training_state: TrainingState,
+    primal_weight: float,
+    dual_weight: float,
+    stationarity_weight: float,
+    complementary_slackness_weight: float,
+) -> float:
     model.train()
-    total, steps = 0.0, 0
     for batch in loader:
-        flat_input = batch["flat_input"].to(device)
-        A = batch["A"].to(device)
-        b = batch["b"].to(device)
-        c = batch["c"].to(device)
-        mask_m = batch["mask_m"].to(device)
-        mask_n = batch["mask_n"].to(device)
-        y = batch["y"].to(device) if batch["y"] is not None else None
+        if isinstance(batch[0], torch_geometric.data.Batch):
+            # Graph path
+            batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes = batch
+            batch_graph = batch_graph.to(device)
+            A, b, c = A.to(device), b.to(device), c.to(device)
+            mask_m, mask_n = mask_m.to(device), mask_n.to(device)
 
-        B, M, N = A.shape[0], A.shape[1], A.shape[2]
-        # Ensure model matches current padded sizes (instantiate once with max M,N you plan to use)
-        y_pred = model(flat_input)
+            # GNN forward (flat sequences)
+            x_all, lam_all = model(
+                batch_graph.constraint_features,
+                batch_graph.edge_index,
+                batch_graph.edge_attr,
+                batch_graph.variable_features,
+            )
+            # Pack back to [B, max_*]
+            x_pred = pack_by_sizes(x_all, n_sizes, c.shape[1])
+            lam_pred = pack_by_sizes(lam_all, m_sizes, b.shape[1])
 
-        loss, parts = kkt_loss(
-            y_true=y,
+            y_pred = torch.cat([x_pred, lam_pred], dim=1)
+        else:
+            # MLP path
+            model_input, A, b, c, mask_m, mask_n = batch
+            model_input = model_input.to(device)
+            A, b, c = A.to(device), b.to(device), c.to(device)
+            mask_m, mask_n = mask_m.to(device), mask_n.to(device)
+            y_pred = model(model_input)
+        loss, _ = kkt_loss(
             y_pred=y_pred,
             A=A,
             b=b,
             c=c,
-            m=M,
-            n=N,
             mask_m=mask_m,
             mask_n=mask_n,
+            primal_weight=primal_weight,
+            dual_weight=dual_weight,
+            stationarity_weight=stationarity_weight,
+            complementary_slackness_weight=complementary_slackness_weight,
         )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        total += float(loss.item())
-        steps += 1
-    return total / max(steps, 1)
+        training_state.add_training_step(loss)
+
+    return training_state.finish_epoch()
+
+
+@torch.no_grad()
+def eval_epoch(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: str,
+    primal_weight: float,
+    dual_weight: float,
+    stationarity_weight: float,
+    complementary_slackness_weight: float,
+) -> Tuple[float, Dict[str, float]]:
+    model.eval()
+    total_loss, n_batches = 0.0, 0
+    terms_sum: Dict[str, float] = {}
+    validation_metrics: Dict[str, float] = {}
+
+    for batch in loader:
+        n_batches += 1
+        if isinstance(batch[0], torch_geometric.data.Batch):
+            batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes = batch
+            batch_graph = batch_graph.to(device)
+            A, b, c = A.to(device), b.to(device), c.to(device)
+            mask_m, mask_n = mask_m.to(device), mask_n.to(device)
+            x_all, lam_all = model(
+                batch_graph.constraint_features,
+                batch_graph.edge_index,
+                batch_graph.edge_attr,
+                batch_graph.variable_features,
+            )
+            x_pred = pack_by_sizes(x_all, n_sizes, c.shape[1])
+            lam_pred = pack_by_sizes(lam_all, m_sizes, b.shape[1])
+            y_pred = torch.cat([x_pred, lam_pred], dim=1)
+        else:
+            model_input, A, b, c, mask_m, mask_n = batch
+            model_input = model_input.to(device)
+            A, b, c = A.to(device), b.to(device), c.to(device)
+            mask_m, mask_n = mask_m.to(device), mask_n.to(device)
+            y_pred = model(model_input)
+
+        loss, terms = kkt_loss(
+            y_pred=y_pred,
+            A=A,
+            b=b,
+            c=c,
+            mask_m=mask_m,
+            mask_n=mask_n,
+            primal_weight=primal_weight,
+            dual_weight=dual_weight,
+            stationarity_weight=stationarity_weight,
+            complementary_slackness_weight=complementary_slackness_weight,
+        )
+        total_loss += loss.item()
+        for term_name, term_sum in terms.items():
+            terms_sum[term_name] = terms_sum.get(term_name, 0.0) + term_sum.item()
+
+    for term_name, term_sum in terms_sum.items():
+        validation_metrics[f"valid/{term_name}"] = term_sum / n_batches
+
+    return total_loss / n_batches, validation_metrics
 
 
 if __name__ == "__main__":

@@ -172,10 +172,14 @@ class LPDataset(Dataset):
         self, lp_path: Union[str, Path]
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         model = Model()
+        model.hideOutput(True)
         model.readProblem(lp_path)
 
         variables = model.getVars()
         n_variables = len(variables)
+        variable_idx = {
+            str(variable): index for index, variable in enumerate(variables)
+        }
 
         rows = []
         rhs = []
@@ -183,19 +187,15 @@ class LPDataset(Dataset):
         # Row constraints
         for constraint in model.getConss():
             row = np.zeros(n_variables, dtype=np.float32)
-            constraint_vars, constraint_coefficients = (
-                constraint.getVars(),
-                constraint.getValsLinear(),
-            )  # coefficients
-            for constraint_variable, constraint_coefficient in zip(
-                constraint_vars, constraint_coefficients
-            ):
-                j = variables.index(constraint_variable)
-                row[j] = constraint_coefficient
+
+            constraint_coefficients = model.getValsLinear(constraint)
+
+            for v, coef in constraint_coefficients.items():
+                row[variable_idx[str(v)]] += float(coef)
 
             # SCIP stores lhs <= a^T x <= rhs (could be +/- inf)
-            lhs = constraint.getLhs()
-            rhs_r = constraint.getRhs()
+            lhs = model.getLhs(constraint)
+            rhs_r = model.getRhs(constraint)
 
             # handle three cases: <=, >=, == (lhs == rhs)
             # equality: split into two inequalities
@@ -220,8 +220,8 @@ class LPDataset(Dataset):
 
         # Variable bounds as constraints
         for j, v in enumerate(variables):
-            lb = v.getLb()
-            ub = v.getUb()
+            lb = v.getLbOriginal()
+            ub = v.getUbOriginal()
             # x_j <= ub
             if ub < SCIP_INF:
                 row = np.zeros(n_variables, dtype=np.float32)
@@ -239,9 +239,7 @@ class LPDataset(Dataset):
         b = np.asarray(rhs, dtype=np.float32)  # [m]
 
         # Objective c
-        c = np.asarray(
-            [model.getObjCoef(v) for v in variables], dtype=np.float32
-        )  # [n]
+        c = np.asarray([v.getObj() for v in variables], dtype=np.float32)  # [n]
 
         return A, b, c
 
@@ -259,57 +257,36 @@ class LPDataset(Dataset):
         }
 
 
-def pad_collate(batch: List[Dict]):
-    """
-    Pads A (m,n), b (m), c (n) to (M,N) in the batch. Returns masks for real rows/cols.
-    Also returns the flat input [A_flat, b, c] expected by the MLP.
-    """
-    m_list = [item["m"] for item in batch]
-    n_list = [item["n"] for item in batch]
+def make_pad_collate(M_fixed: int, N_fixed: int):
+    def _pad_collate(batch: List[Dict]):
+        # infer device/dtype from first sample
+        A0, b0, c0 = batch[0]["A"], batch[0]["b"], batch[0]["c"]
+        device = A0.device
+        dtypeA, dtypeb, dtypec = A0.dtype, b0.dtype, c0.dtype
 
-    A, b, c = [], [], []
-    mask_m, mask_n = [], []
+        B = len(batch)
+        A_batch = torch.zeros((B, M_fixed, N_fixed), dtype=dtypeA, device=device)
+        b_batch = torch.zeros((B, M_fixed), dtype=dtypeb, device=device)
+        c_batch = torch.zeros((B, N_fixed), dtype=dtypec, device=device)
+        mask_m = torch.zeros((B, M_fixed), dtype=torch.float32, device=device)
+        mask_n = torch.zeros((B, N_fixed), dtype=torch.float32, device=device)
 
-    for item in batch:
-        A, b, c = item["A"], item["b"], item["c"]
-        m, n = item["m"], item["n"]
+        for i, item in enumerate(batch):
+            A_i, b_i, c_i = item["A"], item["b"], item["c"]
+            m_i, n_i = item["m"], item["n"]  # actual sizes of THIS sample
 
-        # pad A to [M, N]
-        A_full = torch.zeros((max(m_list), max(n_list)), dtype=A.dtype)
-        A_full[:m, :n] = A
-        A.append(A_full)
+            # copy into the top‑left block
+            A_batch[i, :m_i, :n_i] = A_i
+            b_batch[i, :m_i] = b_i
+            c_batch[i, :n_i] = c_i
+            mask_m[i, :m_i] = 1.0
+            mask_n[i, :n_i] = 1.0
 
-        # pad b to [M], c to [N]
-        b_full = torch.zeros((max(m_list),), dtype=b.dtype)
-        b_full[:m] = b
-        c_full = torch.zeros((max(n_list),), dtype=c.dtype)
-        c_full[:n] = c
-        b.append(b_full)
-        c.append(c_full)
+        # flat input = [vec(A), b, c]
+        flat_input = torch.cat([A_batch.view(B, -1), b_batch, c_batch], dim=1)
+        return flat_input, A_batch, b_batch, c_batch, mask_m, mask_n
 
-        # masks
-        mask_m.append(torch.arange(max(m_list)) < m)  # [M]
-        mask_n.append(torch.arange(max(n_list)) < n)  # [N]
-
-    A = torch.stack(A, dim=0)  # [B, M, N]
-    b = torch.stack(b, dim=0)  # [B, M]
-    c = torch.stack(c, dim=0)  # [B, N]
-    mask_m = torch.stack(mask_m, dim=0).float()  # [B, M]
-    mask_n = torch.stack(mask_n, dim=0).float()  # [B, N]
-
-    # flat input = [A_flat, b, c]
-    B = A.shape[0]
-    flat_A = A.view(B, -1)
-    flat_input = torch.cat([flat_A, b, c], dim=1)  # [B, M*N + M + N]
-
-    return {
-        "flat_input": flat_input,
-        "A": A,
-        "b": b,
-        "c": c,
-        "mask_m": mask_m,
-        "mask_n": mask_n,
-    }
+    return _pad_collate
 
 
 def pad_collate_graphs(
@@ -326,7 +303,7 @@ def pad_collate_graphs(
     List[str],
 ]:
     graphs: List["BipartiteNodeData"] = []
-    A, b_list, c_list = [], [], []
+    A_sp_list, b_list, c_list = [], [], []
     m_sizes, n_sizes = [], []
 
     for data in batch:
@@ -343,10 +320,9 @@ def pad_collate_graphs(
             values=data.edge_attr.squeeze(-1),
             size=(m, n),
         ).coalesce()
-        assert A_sparse.size(0) == m and A_sparse.size(1) == n
 
         graphs.append(data)
-        A.append(A_sparse)
+        A_sp_list.append(A_sparse)
         b_list.append(data.b_vec)
         c_list.append(data.c_vec)
         m_sizes.append(m)
@@ -354,16 +330,23 @@ def pad_collate_graphs(
 
     B = len(batch)
     max_m, max_n = max(m_sizes), max(n_sizes)
+    A = torch.zeros(B, max_m, max_n, dtype=torch.float32)
     b = torch.zeros(B, max_m, dtype=torch.float32)
     c = torch.zeros(B, max_n, dtype=torch.float32)
+    mask_m = torch.zeros(B, max_m, dtype=torch.float32)
+    mask_n = torch.zeros(B, max_n, dtype=torch.float32)
 
-    for i, (b, m) in enumerate(zip(b_list, m_sizes)):
-        b[i, :m] = b
-    for i, (c, n) in enumerate(zip(c_list, n_sizes)):
-        c[i, :n] = c
+    for i, (A_sp, b_i, c_i, m, n) in enumerate(
+        zip(A_sp_list, b_list, c_list, m_sizes, n_sizes)
+    ):
+        A[i, :m, :n] = A_sp.to_dense()
+        b[i, :m] = b_i
+        c[i, :n] = c_i
+        mask_m[i, :m] = 1.0
+        mask_n[i, :n] = 1.0
 
     batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
-    return batch_graph, A, b, c, m_sizes, n_sizes
+    return batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes
 
 
 def right_pad(x: torch.Tensor, target: int) -> torch.Tensor:

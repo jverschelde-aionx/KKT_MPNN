@@ -14,17 +14,17 @@ import numpy as np
 import pyscipopt as scp
 import torch
 import torch.nn as nn
+from graphtrans.modules.utils import pad_batch
 from loguru import logger
+
+# --- Your project imports (update paths if your src/ layout differs) ---
+from models.gnn_transformer import GNNTransformer
+from models.policy_encoder import GraphDataset, PolicyEncoder, collate
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch.utils.data import DataLoader
 
-from graphtrans.modules.utils import pad_batch
-
-# --- Your project imports (update paths if your src/ layout differs) ---
-from models.gnn_transformer import GNNTransformer
 from models.losses import KKTLoss, kkt_metrics
-from models.policy_encoder import GraphDataset, PolicyEncoder, collate
 
 # ------------------------------- Utils ------------------------------------- #
 
@@ -585,7 +585,7 @@ def opt_vs_pred_comparison(
 def main():
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
-        description="evaluate a trained GNN-Transformer and plot embeddings",
+        description="evaluate a trained model and plot predictions",
         default_config_files=["config.yml"],
     )
 

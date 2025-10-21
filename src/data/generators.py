@@ -17,6 +17,7 @@ from ecole.instance import (
     IndependentSetGenerator,
     SetCoverGenerator,
 )
+from gurobipy import GRB
 from loguru import logger
 
 from data.common import (
@@ -125,32 +126,39 @@ def _constraint_sense_code(problem, constraint) -> Tuple[int, float]:
     return 1, lhs  # >=
 
 
-def force_minimize_lp_inplace(lp_path: Path) -> bool:
+def relax_to_lp_and_minimize_inplace(lp_path: Path) -> None:
     """
-    Open an LP file, and if it is a maximization, negate the linear objective
-    and switch model sense to minimization. Rewrites the LP in place.
-    Returns True if a flip was performed, else False.
+    Ensure the on-disk model is a *linear minimization* problem.
 
-    NOTE: This handles linear objectives (LP). If you later introduce quadratic
-    terms, you must also negate the Q part of the objective.
+    Steps:
+    - Read original model (.lp may contain MIP/SOS/indicator).
+    - Build LP relaxation with m.relax() (removes integrality & SOS/indicator constraints).
+    - If it was a maximization, negate objective and switch to minimization.
+    - Overwrite the same .lp file with the relaxed/minimized model.
     """
     m = gp.read(str(lp_path))
+    mr = None
     try:
-        if m.ModelSense == -1:  # -1 = maximize, +1 = minimize
-            # negate linear objective coefficients
-            for v in m.getVars():
-                v.Obj = -v.Obj
+        # LP relaxation removes integrality/SOS/indicator automatically
+        mr = m.relax()
+        mr.update()
 
-            # switch the sense to minimize
-            m.ModelSense = 1
-            m.update()
-            # overwrite the original LP file
-            m.write(str(lp_path))
-            logger.info(f"[flip->min] Rewrote objective for {lp_path.name}")
-            return True
-        else:
-            return False
+        # normalize objective direction to MIN
+        if mr.ModelSense == -1:  # -1 = maximize
+            for v in mr.getVars():
+                v.Obj = -v.Obj
+            mr.ModelSense = 1  # +1 = minimize
+            mr.update()
+
+        # overwrite original path with the relaxed model
+        mr.write(str(lp_path))
+        logger.info(f"[relaxed->LP & MIN] Rewrote {lp_path.name}")
     finally:
+        try:
+            if mr is not None:
+                mr.dispose()
+        except Exception:
+            pass
         m.dispose()
 
 
@@ -178,7 +186,7 @@ def generate_IS_instances(
                 graph_type="barabasi_albert",
             )
             next(gen).write_problem(str(lp_path))
-            force_minimize_lp_inplace(lp_path)
+            relax_to_lp_and_minimize_inplace(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -204,7 +212,7 @@ def generate_CA_instances(
             )
 
             next(gen).write_problem(str(lp_path))
-            force_minimize_lp_inplace(lp_path)
+            relax_to_lp_and_minimize_inplace(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -234,7 +242,7 @@ def generate_SC_instances(
             )
 
             next(gen).write_problem(str(lp_path))
-            force_minimize_lp_inplace(lp_path)
+            relax_to_lp_and_minimize_inplace(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -272,7 +280,7 @@ def generate_CFL_instances(
             )
 
             next(gen).write_problem(str(lp_path))
-            force_minimize_lp_inplace(lp_path)
+            relax_to_lp_and_minimize_inplace(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -292,8 +300,10 @@ def generate_random_instances(
         while optimal_count < n_instances:
             name = f"{ProblemClass.RANDOM_LP}-{size}-{optimal_count:04}.lp"
             lp_path = inst_dir / name
+            print(f"generating lp: {lp_path}")
             if lp_path.exists():
                 lp_paths.append(lp_path)
+                optimal_count += 1
                 continue
             c1 = np.random.uniform(-3, 3, size)
             A1 = np.random.uniform(-3, 3, (size, size))
@@ -327,7 +337,7 @@ def generate_random_instances(
                     if optimal_count % 100 == 0:
                         logger.info(f"Generated {optimal_count} optimal instances")
 
-                    force_minimize_lp_inplace(lp_path)
+                    relax_to_lp_and_minimize_inplace(lp_path)
                     lp_paths.append(lp_path)
                     logger.info(f"Generated optimal instance: {lp_path.name}")
 
@@ -340,11 +350,11 @@ def solve_instance(
 ) -> None:
     gp.setParam("LogToConsole", 0)
     m = gp.read(str(lp_path))
+
     m.Params.Threads = settings.gurobi_threads
-    m.Params.PoolSolutions = settings.gurobi_max_pool
-    m.Params.PoolSearchMode = settings.gurobi_pool_mode
     m.Params.TimeLimit = settings.gurobi_max_time
     m.Params.LogFile = str(log_dir / (lp_path.name + ".log"))
+
     try:
         m.optimize()
     except gp.GurobiError as e:
@@ -352,20 +362,36 @@ def solve_instance(
         m.dispose()
         return
 
-    sols, objs = [], []
-    var_names = [v.VarName for v in m.getVars()]
-    for sn in range(m.SolCount):
-        m.Params.SolutionNumber = sn
-        sols.append(np.array(m.Xn, dtype=np.float32))
-        objs.append(float(m.PoolObjVal))
+    status = m.Status
+    if status in (GRB.INF_OR_UNBD, GRB.INFEASIBLE, GRB.UNBOUNDED):
+        logger.error("LP {} infeasible or unbounded (status={})", lp_path, status)
+        m.dispose()
+        return
+
+    vars_ = m.getVars()
+    var_names = [v.VarName for v in vars_]
+
+    # For LPs, read the primal solution from X (no pool)
+    try:
+        x = m.getAttr(gp.GRB.Attr.X, vars_)
+        obj = float(m.ObjVal)
+    except gp.GurobiError as e:
+        logger.error("No primal solution available for {}: {}", lp_path, e)
+        m.dispose()
+        return
+
     sol_data = {
         "var_names": var_names,
-        "sols": np.vstack(sols),
-        "objs": np.array(objs),
+        "sols": np.asarray([x], dtype=np.float32),  # (1, nvars)
+        "objs": np.asarray([obj], dtype=np.float64),  # (1,)
+        "status": status,
+        "is_lp": True,
     }
 
+    solution_path.parent.mkdir(parents=True, exist_ok=True)
     with open(solution_path, "wb") as f:
         pickle.dump(sol_data, f)
+
     m.dispose()
 
 
