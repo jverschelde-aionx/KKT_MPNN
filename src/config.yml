@@ -1,10 +1,10 @@
 data:
-  problems: ["RND"]
-  is_sizes: [10,50]
-  ca_sizes: [10,50]
-  sc_sizes: [10,50]
-  cfl_sizes: [10,50]
-  rnd_sizes: [2,5,10,50]
+  problems: ["CA"]
+  is_sizes: [2]
+  ca_sizes: [5]
+  sc_sizes: [2]
+  cfl_sizes: [5]
+  rnd_sizes: [2]
   test_split: 0.15
   val_split: 0.15
   n_instances: 7000
@@ -21,39 +21,24 @@ gnn_policy:
   num_emb_type: periodic
   num_emb_bins: 32
   num_emb_freqs: 16
-# Transformer architecture parameters
-transformer:
-  d_model: 128
-  nhead: 8
-  dim_feedforward: 1024
-  transformer_dropout: 0.4237401880161013
-  transformer_activation: "relu"
-  num_encoder_layers: 3
-  transformer_norm_input: true
-  num_encoder_layers_masked: 0
-  transformer_prenorm: true
-  pos_encoder: false
-  type_emb: true
 
 training:
-  use_bipartite_graphs: false
+  use_bipartite_graphs: true
   devices: "0"
-  batch_size: 64
-  epochs: 20
-  lr: 0.0003
+  batch_size: 256
+  epochs: 200
+  lr: 0.001
   seed: 42
-  kkt_w_primal: 1
-  kkt_w_dual: 1
-  kkt_w_station: 1
-  kkt_w_comp: 1
-  log_every: 50
+  primal_weight: 0.1
+  dual_weight: 0.1
+  stationarity_weight: 0.6
+  complementary_slackness_weight: 0.2
+  num_workers: 0
+  log_every: 5
 
 testing:
-  ckpt: exps/kkt_20251005_111401NamespaceNamespace/best.pt
-  bg_path: ../data/IS/BG/test/50/IS-50-0012.lp.bg
-  split: test
+  ckpt: exps/kkt_20251021_121203/best.pt
+  file_path: data/instances/CA/BG/test/5/CA-5-0012.lp.bg
   out_dir: outputs
   device: "0"
-  max_points: 50000
-  tsne: true
-  topk: 40
+  

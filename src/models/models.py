@@ -11,7 +11,6 @@ class KKTNetMLP(nn.Module):
         super().__init__()
         self.m = m
         self.n = n
-
         D_in = m * n + m + n
         self.net = nn.Sequential(
             nn.Linear(D_in, hidden),
@@ -141,12 +140,14 @@ class GNNPolicy(torch.nn.Module):
         self.conv_v_to_c2 = BipartiteGraphConvolution(args.embedding_size)
         self.conv_c_to_v2 = BipartiteGraphConvolution(args.embedding_size)
 
-        # Output module
-        self.output_module = torch.nn.Sequential(
-            torch.nn.Linear(d_out, d_out),
-            torch.nn.ReLU(),
-            torch.nn.Linear(d_out, 1, bias=False),
+        # Heads
+        self.var_head = nn.Sequential(
+            nn.Linear(d_out, d_out), nn.ReLU(), nn.Linear(d_out, 1, bias=False)
         )
+        self.cons_head = nn.Sequential(
+            nn.Linear(d_out, d_out), nn.ReLU(), nn.Linear(d_out, 1, bias=False)
+        )
+        self.lambda_act = nn.Softplus()  # smooth ≥0
 
     def encode(
         self,
@@ -185,8 +186,9 @@ class GNNPolicy(torch.nn.Module):
         c, v = self.encode(
             constraint_features, edge_indices, edge_features, variable_features
         )
-        # optional scalar head
-        return self.output_module(v).squeeze(-1)  # (n_v,)
+        x_all = self.var_head(v).squeeze(-1)  # (sum_n,)
+        lam_all = self.lambda_act(self.cons_head(c).squeeze(-1))  # (sum_m,)  ≥ 0
+        return x_all, lam_all
 
     @staticmethod
     def _build_numeric_block(
