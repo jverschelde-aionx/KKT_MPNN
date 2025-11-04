@@ -172,7 +172,7 @@ class LPDataset(Dataset):
         self, lp_path: Union[str, Path]
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         model = Model()
-        model.hideOutput(True)
+        model.hideOutput(False)
         model.readProblem(lp_path)
 
         variables = model.getVars()

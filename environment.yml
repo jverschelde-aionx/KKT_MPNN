@@ -13,7 +13,7 @@ dependencies:
   - torchvision=0.15.*
   - torchaudio=2.0.*
   - pytorch-cuda=11.8
-  - numpy<2,>=1.21  # Ensure compatibility with PyTorch and other packages
+  - numpy<2,>=1.21 # Ensure compatibility with PyTorch and other packages
 
   # ---------------------------
   # 2) Common Scientific Stack
@@ -45,9 +45,10 @@ dependencies:
   - pyyaml
   - pytest
   - ecole
+  - pyscipopt
   - pyparsing
   - configargparse
-  - smmap          # needed by GitPython
+  - smmap # needed by GitPython
   - gitpython
   # etc. (Any other packages that are in 'defaults' can be added here)
 
@@ -74,19 +75,19 @@ dependencies:
       - docker-pycreds
       - googledrivedownloader
       - littleutils
-      - ogb               # typically in conda-forge, but keep in pip if not using conda-forge
+      - ogb # typically in conda-forge, but keep in pip if not using conda-forge
       - outdated
       - pathtools
       - ortools
       - promise
       - python-louvain
+      - ipykernel
       - sentry-sdk
       - shortuuid
       - subprocess32
       - wandb
       - rdflib
       - gurobipy
-      - pyscipopt
       - ase
       - rtdl_num_embeddings
       - loguru
