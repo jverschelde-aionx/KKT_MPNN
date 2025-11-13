@@ -3,9 +3,11 @@ Hyperparameter Sweep for Model Scaling Experiments
 
 Tests model variants across problem sizes to measure JEPA impact and scaling behavior.
 
-Model Variants:
-- Baselines: MLP, GNN (normalized and unnormalized)
-- JEPA: MLP/GNN × EMA/SimSiam (normalized and unnormalized)
+Model Variants (9 total):
+- MLP: Baseline, JEPA EMA, JEPA SimSiam (always normalized)
+- GNN: Baseline, JEPA EMA, JEPA SimSiam (normalized and unnormalized variants)
+
+Note: normalize_features only applies to GNN (bipartite graph) data, not MLP.
 
 Problem Scaling:
 - Types: RND (Random LP), CA (Combinatorial Auction)
@@ -112,15 +114,10 @@ MODEL_VARIANTS = {
     # =========================================================================
     # Baseline Models (No JEPA)
     # =========================================================================
-    "mlp_baseline_norm": {
+    "mlp_baseline": {
         "use_bipartite_graphs": False,
         "use_jepa": False,
-        "normalize_features": True,
-    },
-    "mlp_baseline_unnorm": {
-        "use_bipartite_graphs": False,
-        "use_jepa": False,
-        "normalize_features": False,
+        "normalize_features": True,  # MLP always uses normalized data
     },
     "gnn_baseline_norm": {
         "use_bipartite_graphs": True,
@@ -134,15 +131,15 @@ MODEL_VARIANTS = {
     },
 
     # =========================================================================
-    # JEPA Models - MLP with EMA
+    # JEPA Models - MLP (always normalized)
     # =========================================================================
-    "mlp_jepa_ema_norm": {
+    "mlp_jepa_ema": {
         "use_bipartite_graphs": False,
         "use_jepa": True,
         "jepa_mode": "ema",
         "jepa_weight": 0.2,
         "jepa_pretrain_epochs": 3,
-        "normalize_features": True,
+        "normalize_features": True,  # MLP always uses normalized data
         "jepa_mask_entry_online": 0.40,
         "jepa_mask_row_online": 0.20,
         "jepa_mask_col_online": 0.20,
@@ -150,45 +147,13 @@ MODEL_VARIANTS = {
         "jepa_mask_row_target": 0.05,
         "jepa_mask_col_target": 0.05,
     },
-    "mlp_jepa_ema_unnorm": {
-        "use_bipartite_graphs": False,
-        "use_jepa": True,
-        "jepa_mode": "ema",
-        "jepa_weight": 0.2,
-        "jepa_pretrain_epochs": 3,
-        "normalize_features": False,
-        "jepa_mask_entry_online": 0.40,
-        "jepa_mask_row_online": 0.20,
-        "jepa_mask_col_online": 0.20,
-        "jepa_mask_entry_target": 0.10,
-        "jepa_mask_row_target": 0.05,
-        "jepa_mask_col_target": 0.05,
-    },
-
-    # =========================================================================
-    # JEPA Models - MLP with SimSiam
-    # =========================================================================
-    "mlp_jepa_simsiam_norm": {
+    "mlp_jepa_simsiam": {
         "use_bipartite_graphs": False,
         "use_jepa": True,
         "jepa_mode": "simsiam",
         "jepa_weight": 0.2,
         "jepa_pretrain_epochs": 0,
-        "normalize_features": True,
-        "jepa_mask_entry_online": 0.40,
-        "jepa_mask_row_online": 0.20,
-        "jepa_mask_col_online": 0.20,
-        "jepa_mask_entry_target": 0.10,
-        "jepa_mask_row_target": 0.05,
-        "jepa_mask_col_target": 0.05,
-    },
-    "mlp_jepa_simsiam_unnorm": {
-        "use_bipartite_graphs": False,
-        "use_jepa": True,
-        "jepa_mode": "simsiam",
-        "jepa_weight": 0.2,
-        "jepa_pretrain_epochs": 0,
-        "normalize_features": False,
+        "normalize_features": True,  # MLP always uses normalized data
         "jepa_mask_entry_online": 0.40,
         "jepa_mask_row_online": 0.20,
         "jepa_mask_col_online": 0.20,

@@ -10,7 +10,7 @@ The sweep script automatically:
 
 ## Usage
 
-### Basic Usage (All 12 models, all sizes)
+### Basic Usage (All 9 models, all sizes)
 ```bash
 cd src
 python hyperparameter_sweep.py \
@@ -20,10 +20,12 @@ python hyperparameter_sweep.py \
 ```
 
 **Result**:
-- Creates 144 experiments (12 models × 2 types × 6 sizes)
+- Creates 108 experiments (9 models × 2 types × 6 sizes)
 - Automatically exports to `sweep_results.xlsx`
 
-### Start Small (24 experiments)
+**Note**: MLP models always use normalized data. Only GNN models have normalized/unnormalized variants.
+
+### Start Small (18 experiments)
 ```bash
 python hyperparameter_sweep.py \
   --problem-types RND CA \
@@ -34,7 +36,7 @@ python hyperparameter_sweep.py \
 ### Test Specific Models
 ```bash
 python hyperparameter_sweep.py \
-  --model-variants mlp_baseline_norm gnn_baseline_norm \
+  --model-variants mlp_baseline gnn_baseline_norm gnn_baseline_unnorm \
   --problem-sizes 2 5 10 \
   --epochs 20
 ```
@@ -53,25 +55,22 @@ python hyperparameter_sweep.py \
   --epochs 50
 ```
 
-## Available Model Variants
+## Available Model Variants (9 total)
 
-**Baselines (4):**
-- `mlp_baseline_norm`
-- `mlp_baseline_unnorm`
+**MLP Models (3) - always normalized:**
+- `mlp_baseline`
+- `mlp_jepa_ema`
+- `mlp_jepa_simsiam`
+
+**GNN Models (6) - normalized and unnormalized:**
 - `gnn_baseline_norm`
 - `gnn_baseline_unnorm`
-
-**JEPA with EMA (4):**
-- `mlp_jepa_ema_norm`
-- `mlp_jepa_ema_unnorm`
 - `gnn_jepa_ema_norm`
 - `gnn_jepa_ema_unnorm`
-
-**JEPA with SimSiam (4):**
-- `mlp_jepa_simsiam_norm`
-- `mlp_jepa_simsiam_unnorm`
 - `gnn_jepa_simsiam_norm`
 - `gnn_jepa_simsiam_unnorm`
+
+**Note**: The `normalize_features` flag only applies to GNN (bipartite graph) data loading, not MLP.
 
 ## Parallel Execution
 
