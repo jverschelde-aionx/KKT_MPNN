@@ -213,6 +213,31 @@ class GNNPolicy(torch.nn.Module):
         )
         self.lambda_act = nn.Softplus()  # smooth ≥0
 
+        # JEPA components: per-node projectors and predictors
+        jepa_embed_dim = 128
+        # Constraint node projector and predictor
+        self.cons_jepa_proj = nn.Sequential(
+            nn.Linear(d_out, d_out // 2),
+            nn.ReLU(),
+            nn.Linear(d_out // 2, jepa_embed_dim)
+        )
+        self.cons_jepa_pred = nn.Sequential(
+            nn.Linear(jepa_embed_dim, d_out // 2),
+            nn.ReLU(),
+            nn.Linear(d_out // 2, jepa_embed_dim)
+        )
+        # Variable node projector and predictor
+        self.var_jepa_proj = nn.Sequential(
+            nn.Linear(d_out, d_out // 2),
+            nn.ReLU(),
+            nn.Linear(d_out // 2, jepa_embed_dim)
+        )
+        self.var_jepa_pred = nn.Sequential(
+            nn.Linear(jepa_embed_dim, d_out // 2),
+            nn.ReLU(),
+            nn.Linear(d_out // 2, jepa_embed_dim)
+        )
+
     def encode(
         self,
         constraint_features: torch.Tensor,
@@ -253,6 +278,41 @@ class GNNPolicy(torch.nn.Module):
         x_all = self.var_head(v).squeeze(-1)  # (sum_n,)
         lam_all = self.lambda_act(self.cons_head(c).squeeze(-1))  # (sum_m,)  ≥ 0
         return x_all, lam_all
+
+    def jepa_embed_nodes(
+        self,
+        constraint_features: torch.Tensor,
+        edge_indices: torch.Tensor,
+        edge_features: torch.Tensor,
+        variable_features: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        JEPA embedding for GNN: encode → project → L2-normalize (per node type).
+
+        This method is used for both online and target encoders in JEPA training.
+
+        Args:
+            constraint_features: Constraint node features [num_cons, cons_nfeats]
+            edge_indices: Edge connectivity [2, num_edges]
+            edge_features: Edge features [num_edges, edge_nfeats]
+            variable_features: Variable node features [num_vars, var_nfeats]
+
+        Returns:
+            (cons_emb, var_emb): Tuple of L2-normalized embeddings
+            - cons_emb: Constraint node embeddings [num_cons, jepa_embed_dim]
+            - var_emb: Variable node embeddings [num_vars, jepa_embed_dim]
+        """
+        # Encode using standard GNN encoder
+        c, v = self.encode(constraint_features, edge_indices, edge_features, variable_features)
+
+        # Project and normalize for JEPA
+        cons_proj = self.cons_jepa_proj(c)
+        var_proj = self.var_jepa_proj(v)
+
+        cons_emb = torch.nn.functional.normalize(cons_proj, dim=-1)  # L2-normalize
+        var_emb = torch.nn.functional.normalize(var_proj, dim=-1)   # L2-normalize
+
+        return cons_emb, var_emb
 
     @staticmethod
     def _build_numeric_block(
