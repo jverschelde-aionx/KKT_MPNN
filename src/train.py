@@ -24,6 +24,7 @@ class TrainingState:
         self.steps = 0
         self.trained_items = 0
         self.training_loss_sum = 0.0
+        self.jepa_loss_sum = 0.0  # Track JEPA loss separately
         self.epoch = 0
         self.best_epoch = 0
         self.log_every = log_every
@@ -35,15 +36,30 @@ class TrainingState:
 
         self.training_loss_sum += loss
 
-    def finish_epoch(self) -> float:
+    def add_jepa_loss(self, loss: float):
+        """Add JEPA loss to running sum for epoch averaging."""
+        self.jepa_loss_sum += loss
+
+    def finish_epoch(self) -> Tuple[float, Optional[float]]:
+        """
+        Finish the current epoch and return average losses.
+
+        Returns:
+            (training_loss, jepa_loss): Tuple of average losses
+            jepa_loss is None if JEPA is not being used
+        """
         training_loss = self.training_loss_sum / self.trained_items
+        jepa_loss = (
+            self.jepa_loss_sum / self.trained_items if self.jepa_loss_sum > 0 else None
+        )
         self._reset_training_state()
         self._increment_epoch()
-        return training_loss
+        return training_loss, jepa_loss
 
     def _reset_training_state(self):
         self.trained_items = 0
         self.training_loss_sum = 0.0
+        self.jepa_loss_sum = 0.0
 
     def _increment_epoch(self):
         self.epoch += 1
@@ -364,7 +380,7 @@ def train(overrides: Optional[Mapping] = None):
 
         # Train loop
         for epoch in range(1, args.epochs + 1):
-            train_loss = train_epoch(
+            train_loss, train_jepa_loss = train_epoch(
                 model=model,
                 loader=train_loader,
                 optimizer=optimizer,
@@ -387,16 +403,16 @@ def train(overrides: Optional[Mapping] = None):
             )
 
             # logging
-            wandb.log(
-                {
-                    "epoch": epoch,
-                    "train/loss": train_loss,
-                    "valid/loss": val_loss,
-                    "lr": optimizer.param_groups[0]["lr"],
-                    **validation_metrics,
-                },
-                step=training_state.get_step(),
-            )
+            log_dict = {
+                "epoch": epoch,
+                "train/loss": train_loss,
+                "valid/loss": val_loss,
+                "lr": optimizer.param_groups[0]["lr"],
+                **validation_metrics,
+            }
+            if train_jepa_loss is not None:
+                log_dict["train/loss_jepa_epoch"] = train_jepa_loss
+            wandb.log(log_dict, step=training_state.get_step())
 
             # Model checkpointing
             ckpt = {
@@ -451,7 +467,7 @@ def train_epoch(
     dual_weight: float,
     stationarity_weight: float,
     complementary_slackness_weight: float,
-) -> float:
+) -> Tuple[float, Optional[float]]:
     model.train()
     for batch in loader:
         if isinstance(batch[0], torch_geometric.data.Batch):
