@@ -522,7 +522,10 @@ def encode_ranks_as_bits(
 
 
 def get_bipartite_graph(
-    lp_path: Path, add_pos_feat: bool = True, normalize_pos_feat: bool = False
+    lp_path: Path,
+    add_pos_feat: bool = True,
+    normalize_pos_feat: bool = False,
+    normalize_features: bool = True,
 ) -> Tuple:
     # load model
     problem = scp.Model()
