@@ -384,12 +384,12 @@ def jepa_loss_gnn(
     cons_feat_ctx = ctx_graph.constraint_features
     var_feat_ctx = ctx_graph.variable_features
     edge_index_ctx = ctx_graph.edge_index
-    edge_attr_ctx = ctx_graph.edge_features
+    edge_attr_ctx = ctx_graph.edge_attr  # PyTorch Geometric uses 'edge_attr', not 'edge_features'
 
     cons_feat_tgt = tgt_graph.constraint_features
     var_feat_tgt = tgt_graph.variable_features
     edge_index_tgt = tgt_graph.edge_index
-    edge_attr_tgt = tgt_graph.edge_features
+    edge_attr_tgt = tgt_graph.edge_attr  # PyTorch Geometric uses 'edge_attr', not 'edge_features'
 
     # Online path: context → embed (both node types) → project → predict
     cons_z_on, var_z_on = online_model.jepa_embed_nodes(
