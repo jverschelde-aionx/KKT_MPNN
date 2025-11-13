@@ -12,16 +12,15 @@ Problem Scaling:
 - Sizes: 2, 5, 10, 20, 50, 100
 
 Usage:
-    python hyperparameter_sweep.py --mode local   # Run locally (one config at a time)
-    python hyperparameter_sweep.py --mode sweep   # Launch WandB sweep agent
-    python hyperparameter_sweep.py --export       # Export results to CSV
+    python hyperparameter_sweep.py --problem-types RND CA --problem-sizes 2 5 10 --epochs 50
+
+    Results automatically exported to Excel after sweep completes.
 """
 
 import argparse
-import csv
-from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping
 
+import pandas as pd
 import wandb
 
 from train import train
@@ -253,8 +252,7 @@ def create_sweep_config(
     problem_sizes=[2, 5, 10, 20, 50, 100],
     model_variants=None,
     epochs=50,
-    batch_size_mlp=256,
-    batch_size_gnn=128,
+    batch_size=256,
 ):
     """
     Create WandB sweep configuration for grid search over models and problem sizes.
@@ -264,8 +262,7 @@ def create_sweep_config(
         problem_sizes: List of problem sizes to test (e.g., [2, 5, 10, 20, 50, 100])
         model_variants: List of model variant keys to test (None = all)
         epochs: Number of training epochs
-        batch_size_mlp: Batch size for MLP models
-        batch_size_gnn: Batch size for GNN models (typically smaller due to memory)
+        batch_size: Batch size for training (256 for MLP, reduce to 128 for GNN if needed)
 
     Returns:
         Dictionary with WandB sweep configuration
@@ -298,7 +295,7 @@ def create_sweep_config(
             "training": {
                 "parameters": {
                     "epochs": {"value": epochs},
-                    "batch_size": {"value": batch_size_mlp},  # Will be overridden per model
+                    "batch_size": {"value": batch_size},
                     "lr": {"value": 0.001},
                     "devices": {"value": "0"},
                     "seed": {"value": 42},
@@ -311,20 +308,20 @@ def create_sweep_config(
 
 
 # =============================================================================
-# Results Export to CSV
+# Results Export to Excel
 # =============================================================================
 
-def export_results_to_csv(
+def export_results_to_excel(
     project_name="kkt_model_scaling",
-    output_file="sweep_results.csv",
+    output_file="sweep_results.xlsx",
     entity=None,
 ):
     """
-    Export WandB sweep results to CSV for analysis.
+    Export WandB sweep results to Excel for analysis.
 
     Args:
         project_name: WandB project name
-        output_file: Output CSV filename
+        output_file: Output Excel filename
         entity: WandB entity/username (None = default)
     """
     api = wandb.Api()
@@ -335,7 +332,7 @@ def export_results_to_csv(
     else:
         runs = api.runs(project_name)
 
-    print(f"Found {len(runs)} runs in project '{project_name}'")
+    print(f"\nFound {len(runs)} runs in project '{project_name}'")
 
     # Collect data
     results = []
@@ -388,17 +385,13 @@ def export_results_to_csv(
 
         results.append(result)
 
-    # Write to CSV
+    # Write to Excel
     if results:
-        fieldnames = list(results[0].keys())
-        with open(output_file, "w", newline="") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
-
-        print(f"Exported {len(results)} results to '{output_file}'")
+        df = pd.DataFrame(results)
+        df.to_excel(output_file, index=False, engine='openpyxl')
+        print(f"✅ Exported {len(results)} results to '{output_file}'")
     else:
-        print("No finished runs found to export")
+        print("⚠️  No finished runs found to export")
 
 
 # =============================================================================
@@ -406,98 +399,111 @@ def export_results_to_csv(
 # =============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Model scaling experiments sweep")
-    parser.add_argument(
-        "--mode",
-        choices=["local", "sweep", "export"],
-        default="sweep",
-        help="Run mode: local (test one config), sweep (launch WandB agent), export (download results)",
-    )
-    parser.add_argument(
-        "--export-file",
-        default="sweep_results.csv",
-        help="Output CSV file for results export",
+    parser = argparse.ArgumentParser(
+        description="Model scaling experiments sweep - launches WandB sweep and exports results to Excel"
     )
     parser.add_argument(
         "--project",
         default="kkt_model_scaling",
-        help="WandB project name",
+        help="WandB project name (default: kkt_model_scaling)",
     )
     parser.add_argument(
         "--entity",
         default=None,
-        help="WandB entity/username",
+        help="WandB entity/username (default: your default entity)",
     )
     parser.add_argument(
         "--problem-types",
         nargs="+",
         default=["RND", "CA"],
-        help="Problem types to test (e.g., RND CA)",
+        help="Problem types to test (default: RND CA)",
     )
     parser.add_argument(
         "--problem-sizes",
         type=int,
         nargs="+",
         default=[2, 5, 10, 20, 50, 100],
-        help="Problem sizes to test (e.g., 2 5 10 20 50 100)",
+        help="Problem sizes to test (default: 2 5 10 20 50 100)",
     )
     parser.add_argument(
         "--epochs",
         type=int,
         default=50,
-        help="Number of training epochs",
+        help="Number of training epochs (default: 50)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=256,
+        help="Batch size (default: 256 for MLP, reduce to 128 for GNN if needed)",
     )
     parser.add_argument(
         "--model-variants",
         nargs="+",
         default=None,
-        help="Model variants to test (default: all)",
+        help="Model variants to test (default: all 12 variants)",
+    )
+    parser.add_argument(
+        "--export-file",
+        default="sweep_results.xlsx",
+        help="Output Excel filename (default: sweep_results.xlsx)",
+    )
+    parser.add_argument(
+        "--no-export",
+        action="store_true",
+        help="Skip automatic export after sweep (default: auto-export enabled)",
     )
 
     args = parser.parse_args()
 
-    if args.mode == "export":
-        # Export results to CSV
-        print(f"Exporting results from project '{args.project}'...")
-        export_results_to_csv(
-            project_name=args.project,
-            output_file=args.export_file,
-            entity=args.entity,
-        )
+    # Create and launch sweep
+    sweep_config = create_sweep_config(
+        problem_types=args.problem_types,
+        problem_sizes=args.problem_sizes,
+        model_variants=args.model_variants,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+    )
 
-    elif args.mode == "local":
-        # Test single configuration locally
-        print("Running local test with baseline MLP on RND size 2...")
-        test_overrides = {
-            "problems": ["RND"],
-            "rnd_sizes": [2],
-            "use_bipartite_graphs": False,
-            "use_jepa": False,
-            "normalize_features": True,
-            "epochs": 2,
-            "batch_size": 32,
-            "devices": "0",
-        }
-        train(overrides=test_overrides)
+    num_variants = len(sweep_config['parameters']['model']['values'])
+    num_types = len(args.problem_types)
+    num_sizes = len(args.problem_sizes)
+    total_configs = num_variants * num_types * num_sizes
 
-    else:  # sweep mode
-        # Create and launch sweep
-        sweep_config = create_sweep_config(
-            problem_types=args.problem_types,
-            problem_sizes=args.problem_sizes,
-            model_variants=args.model_variants,
-            epochs=args.epochs,
-        )
+    print("\n" + "="*70)
+    print("  KKT Model Scaling Experiments - WandB Sweep")
+    print("="*70)
+    print(f"Project: {args.project}")
+    print(f"Model variants: {num_variants}")
+    print(f"Problem types: {args.problem_types}")
+    print(f"Problem sizes: {args.problem_sizes}")
+    print(f"Epochs per run: {args.epochs}")
+    print(f"Total experiments: {total_configs}")
+    print("="*70 + "\n")
 
-        print(f"Creating sweep with {len(sweep_config['parameters']['model']['values'])} model variants")
-        print(f"Problem types: {args.problem_types}")
-        print(f"Problem sizes: {args.problem_sizes}")
-        print(f"Total configurations: {len(sweep_config['parameters']['model']['values']) * len(args.problem_types) * len(args.problem_sizes)}")
+    sweep_id = wandb.sweep(sweep=sweep_config, project=args.project, entity=args.entity)
 
-        sweep_id = wandb.sweep(sweep=sweep_config, project=args.project, entity=args.entity)
-        print(f"\nSweep created with ID: {sweep_id}")
-        print(f"Launch agents with: wandb agent {sweep_id}")
-        print("\nOr run agent now:")
+    print(f"✅ Sweep created with ID: {sweep_id}\n")
+    print("To launch additional parallel agents, run:")
+    print(f"  wandb agent {sweep_id}\n")
+    print("Starting sweep agent...\n")
 
-        # Launch agent
+    # Launch agent
+    try:
         wandb.agent(sweep_id, function=main, project=args.project)
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Sweep interrupted by user")
+    finally:
+        # Auto-export results unless disabled
+        if not args.no_export:
+            print("\n" + "="*70)
+            print("  Exporting Results to Excel")
+            print("="*70 + "\n")
+            export_results_to_excel(
+                project_name=args.project,
+                output_file=args.export_file,
+                entity=args.entity,
+            )
+            print("\n✅ Sweep complete! Results saved to:", args.export_file)
+        else:
+            print("\n✅ Sweep complete! (Auto-export disabled)")
