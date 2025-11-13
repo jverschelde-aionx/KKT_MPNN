@@ -525,17 +525,17 @@ def train_epoch(
 
             if isinstance(batch[0], torch_geometric.data.Batch):
                 # GNN path: create node-level masked views
-                ctx_graph = make_gnn_views(
+                # Note: make_gnn_views returns both ctx (masked) and tgt (clean) in one call
+                ctx_graph, tgt_graph, mask_cons, mask_vars = make_gnn_views(
                     batch_graph, mask_ratio=args.jepa_mask_ratio_nodes
-                )
-                tgt_graph = make_gnn_views(
-                    batch_graph, mask_ratio=0.0  # clean target
                 )
                 loss_jepa = jepa_loss_gnn(
                     online_model=model,
                     target_model=target_model,
                     ctx_graph=ctx_graph,
                     tgt_graph=tgt_graph,
+                    mask_cons=mask_cons,
+                    mask_vars=mask_vars,
                     mode=args.jepa_mode,
                 )
             else:
