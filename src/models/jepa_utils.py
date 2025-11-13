@@ -102,8 +102,8 @@ def make_lp_jepa_views(
         A: Constraint matrix [B, M, N]
         b: RHS vector [B, M]
         c: Objective coefficients [B, N]
-        mask_m: Real number of constraints per sample [B] (for padding safety)
-        mask_n: Real number of variables per sample [B] (for padding safety)
+        mask_m: Binary mask for constraints [B, M] - 1.0 = real, 0.0 = padding
+        mask_n: Binary mask for variables [B, N] - 1.0 = real, 0.0 = padding
         r_entry_on: Online view - fraction of A entries to mask (default: 0.40)
         r_row_on: Online view - fraction of constraint rows to mask (default: 0.20)
         r_col_on: Online view - fraction of variable columns to mask (default: 0.20)
@@ -150,8 +150,10 @@ def make_lp_jepa_views(
 
         # Process each sample in batch
         for i in range(B):
-            m_real = int(mask_m[i].item())  # Real number of constraints
-            n_real = int(mask_n[i].item())  # Real number of variables
+            # mask_m and mask_n are 2D binary masks [B, M/N] from data pipeline
+            # Count number of real (non-padded) constraints/variables
+            m_real = int(mask_m[i].sum().item())  # Count 1s in binary mask
+            n_real = int(mask_n[i].sum().item())  # Count 1s in binary mask
 
             # Safety check: need at least 2 rows and 2 columns to guarantee context
             if m_real < 2 or n_real < 2:
