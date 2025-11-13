@@ -390,6 +390,8 @@ def train(overrides: Optional[Mapping] = None):
                 dual_weight=args.dual_weight,
                 stationarity_weight=args.stationarity_weight,
                 complementary_slackness_weight=args.complementary_slackness_weight,
+                args=args,
+                target_model=target_model,
             )
 
             val_loss, validation_metrics = eval_epoch(
@@ -470,6 +472,8 @@ def train_epoch(
     dual_weight: float,
     stationarity_weight: float,
     complementary_slackness_weight: float,
+    args=None,
+    target_model=None,
 ) -> Tuple[float, Optional[float]]:
     model.train()
     for batch in loader:
