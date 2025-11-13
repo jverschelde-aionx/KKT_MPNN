@@ -18,6 +18,7 @@ class Settings:
     val_split: float = 0.15
     add_positional_features: bool = True
     normalize_positional_features: bool = False
+    normalize_features: bool = True
     # Independent‑Set
     edge_probability: float = 0.25
     # Combinatorial‑Auction
