@@ -463,6 +463,7 @@ def generate_instances(settings: Settings) -> None:
                             lp_path,
                             settings.add_positional_features,
                             settings.normalize_positional_features,
+                            settings.normalize_features,
                         )
                     except Exception as e:
                         logger.error("Failed on {} – {}", lp_path, e)
