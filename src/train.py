@@ -540,29 +540,20 @@ def train_epoch(
                 )
             else:
                 # MLP path: create LP-aware asymmetric views
-                x_online = make_lp_jepa_views(
+                x_online, x_target = make_lp_jepa_views(
                     A=A,
                     b=b,
                     c=c,
                     mask_m=mask_m,
                     mask_n=mask_n,
-                    mask_entry_ratio=args.jepa_mask_entry_online,
-                    mask_row_ratio=args.jepa_mask_row_online,
-                    mask_col_ratio=args.jepa_mask_col_online,
-                    noisy=args.jepa_noisy_mask,
+                    r_entry_on=args.jepa_mask_entry_online,
+                    r_row_on=args.jepa_mask_row_online,
+                    r_col_on=args.jepa_mask_col_online,
+                    r_entry_tg=args.jepa_mask_entry_target,
+                    r_row_tg=args.jepa_mask_row_target,
+                    r_col_tg=args.jepa_mask_col_target,
+                    noisy_mask=args.jepa_noisy_mask,
                     row_scaling=args.jepa_row_scaling,
-                )
-                x_target = make_lp_jepa_views(
-                    A=A,
-                    b=b,
-                    c=c,
-                    mask_m=mask_m,
-                    mask_n=mask_n,
-                    mask_entry_ratio=args.jepa_mask_entry_target,
-                    mask_row_ratio=args.jepa_mask_row_target,
-                    mask_col_ratio=args.jepa_mask_col_target,
-                    noisy=False,  # target is always clean
-                    row_scaling=False,
                 )
                 loss_jepa = jepa_loss_mlp(
                     online_model=model,
