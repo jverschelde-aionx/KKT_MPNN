@@ -1,5 +1,6 @@
 import os
 import random
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -337,6 +338,15 @@ def train(overrides: Optional[Mapping] = None):
             if args.use_bipartite_graphs
             else KKTNetMLP(M_max, N_max).to(device)
         )
+
+        # Create optional EMA target model for JEPA training
+        target_model = None
+        if args.use_jepa and args.jepa_mode == "ema":
+            target_model = deepcopy(model)
+            for p in target_model.parameters():
+                p.requires_grad_(False)
+            logger.info("Created EMA target model for JEPA training")
+
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
         save_dir = Path("exps") / run_name
