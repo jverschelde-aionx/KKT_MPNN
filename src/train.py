@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 import wandb
 from data.common import ProblemClass
 from data.datasets import GraphDataset, LPDataset, make_pad_collate, pad_collate_graphs
-from models.jepa_utils import jepa_loss_gnn, jepa_loss_mlp, make_gnn_views, make_lp_jepa_views
+from models.jepa_utils import ema_update, jepa_loss_gnn, jepa_loss_mlp, make_gnn_views, make_lp_jepa_views
 from models.losses import kkt_loss
 from models.models import GNNPolicy, KKTNetMLP
 
@@ -598,6 +598,11 @@ def train_epoch(
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        # Update target encoder with EMA (if using EMA mode)
+        if args and args.use_jepa and args.jepa_mode == "ema" and target_model is not None:
+            ema_update(target_model, model, m=args.ema_momentum)
+
         training_state.add_training_step(loss)
 
     return training_state.finish_epoch()
