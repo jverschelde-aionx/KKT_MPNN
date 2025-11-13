@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 import wandb
 from data.common import ProblemClass
 from data.datasets import GraphDataset, LPDataset, make_pad_collate, pad_collate_graphs
+from models.jepa_utils import jepa_loss_gnn, jepa_loss_mlp, make_gnn_views, make_lp_jepa_views
 from models.losses import kkt_loss
 from models.models import GNNPolicy, KKTNetMLP
 
@@ -503,7 +504,7 @@ def train_epoch(
             A, b, c = A.to(device), b.to(device), c.to(device)
             mask_m, mask_n = mask_m.to(device), mask_n.to(device)
             y_pred = model(model_input)
-        loss, _ = kkt_loss(
+        loss_kkt, _ = kkt_loss(
             y_pred=y_pred,
             A=A,
             b=b,
@@ -515,6 +516,85 @@ def train_epoch(
             stationarity_weight=stationarity_weight,
             complementary_slackness_weight=complementary_slackness_weight,
         )
+
+        # JEPA loss computation (if enabled)
+        loss_jepa = None
+        if args and args.use_jepa:
+            current_epoch = training_state.get_epoch()
+            jepa_only = current_epoch < args.jepa_pretrain_epochs
+
+            if isinstance(batch[0], torch_geometric.data.Batch):
+                # GNN path: create node-level masked views
+                ctx_graph = make_gnn_views(
+                    batch_graph, mask_ratio=args.jepa_mask_ratio_nodes
+                )
+                tgt_graph = make_gnn_views(
+                    batch_graph, mask_ratio=0.0  # clean target
+                )
+                loss_jepa = jepa_loss_gnn(
+                    online_model=model,
+                    target_model=target_model,
+                    ctx_graph=ctx_graph,
+                    tgt_graph=tgt_graph,
+                    mode=args.jepa_mode,
+                )
+            else:
+                # MLP path: create LP-aware asymmetric views
+                x_online = make_lp_jepa_views(
+                    A=A,
+                    b=b,
+                    c=c,
+                    mask_m=mask_m,
+                    mask_n=mask_n,
+                    mask_entry_ratio=args.jepa_mask_entry_online,
+                    mask_row_ratio=args.jepa_mask_row_online,
+                    mask_col_ratio=args.jepa_mask_col_online,
+                    noisy=args.jepa_noisy_mask,
+                    row_scaling=args.jepa_row_scaling,
+                )
+                x_target = make_lp_jepa_views(
+                    A=A,
+                    b=b,
+                    c=c,
+                    mask_m=mask_m,
+                    mask_n=mask_n,
+                    mask_entry_ratio=args.jepa_mask_entry_target,
+                    mask_row_ratio=args.jepa_mask_row_target,
+                    mask_col_ratio=args.jepa_mask_col_target,
+                    noisy=False,  # target is always clean
+                    row_scaling=False,
+                )
+                loss_jepa = jepa_loss_mlp(
+                    online_model=model,
+                    target_model=target_model,
+                    x_online=x_online,
+                    x_target=x_target,
+                    mode=args.jepa_mode,
+                )
+
+            # Track JEPA loss separately
+            training_state.add_jepa_loss(loss_jepa.item())
+
+            # Log JEPA and KKT losses to WandB
+            wandb.log(
+                {
+                    "train/loss_jepa": loss_jepa.item(),
+                    "train/loss_kkt": loss_kkt.item(),
+                },
+                step=training_state.get_step(),
+            )
+
+            # Combine losses based on training schedule
+            if jepa_only:
+                # Pre-training: JEPA loss only
+                loss = loss_jepa
+            else:
+                # Joint training: weighted combination
+                loss = loss_kkt + args.jepa_weight * loss_jepa
+        else:
+            # No JEPA: use KKT loss only
+            loss = loss_kkt
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
