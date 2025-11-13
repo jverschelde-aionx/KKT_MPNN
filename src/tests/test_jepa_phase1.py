@@ -231,7 +231,7 @@ class TestJEPAUtilities:
             constraint_features=cons_feat,
             variable_features=var_feat,
             edge_index=edge_index,
-            edge_features=edge_feat
+            edge_attr=edge_feat  # Fixed: use edge_attr instead of edge_features
         )
         batch_graph = Batch.from_data_list([graph])
 
@@ -268,7 +268,7 @@ class TestJEPAUtilities:
             constraint_features=cons_feat,
             variable_features=var_feat,
             edge_index=edge_index,
-            edge_features=edge_feat
+            edge_attr=edge_feat  # Fixed: use edge_attr instead of edge_features
         )
         batch_graph = Batch.from_data_list([graph])
 
@@ -277,8 +277,8 @@ class TestJEPAUtilities:
         # Check that edge structure is preserved
         assert torch.equal(ctx_graph.edge_index, batch_graph.edge_index), \
             "Edge indices should be unchanged"
-        assert torch.equal(ctx_graph.edge_features, batch_graph.edge_features), \
-            "Edge features should be unchanged"
+        assert torch.equal(ctx_graph.edge_attr, batch_graph.edge_attr), \
+            "Edge features should be unchanged"  # Fixed: use edge_attr
 
     def test_jepa_loss_mlp_returns_scalar(self):
         """Test that MLP JEPA loss returns a scalar"""
@@ -618,7 +618,7 @@ class TestIntegration:
             constraint_features=cons_feat,
             variable_features=var_feat,
             edge_index=edge_index,
-            edge_features=edge_feat
+            edge_attr=edge_feat  # Fixed: use edge_attr instead of edge_features
         )
         batch_graph = Batch.from_data_list([graph])
 
