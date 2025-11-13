@@ -102,6 +102,90 @@ def train(overrides: Optional[Mapping] = None):
             help="Log lightweight scalars every N steps.",
         )
 
+        # JEPA (Joint-Embedding Predictive Architecture)
+        t.add_argument("--use_jepa", action="store_true", help="Enable JEPA self-supervised training")
+        t.add_argument(
+            "--jepa_mode",
+            choices=["ema", "simsiam"],
+            default="ema",
+            help="JEPA mode: EMA teacher (BYOL/I-JEPA) or SimSiam (no EMA)",
+        )
+        t.add_argument("--jepa_weight", type=float, default=0.2, help="Weight for JEPA loss (relative to KKT loss)")
+        t.add_argument(
+            "--jepa_pretrain_epochs",
+            type=int,
+            default=3,
+            help="Number of JEPA-only pre-training epochs before joint KKT+JEPA training (0 for joint from start)",
+        )
+
+        # LP-aware masking for MLP (online/context view - heavier mask)
+        t.add_argument(
+            "--jepa_mask_entry_online",
+            type=float,
+            default=0.40,
+            help="MLP online view: fraction of A entries masked",
+        )
+        t.add_argument(
+            "--jepa_mask_row_online",
+            type=float,
+            default=0.20,
+            help="MLP online view: fraction of constraint rows masked",
+        )
+        t.add_argument(
+            "--jepa_mask_col_online",
+            type=float,
+            default=0.20,
+            help="MLP online view: fraction of variable columns masked",
+        )
+
+        # LP-aware masking for MLP (target view - lighter or clean mask)
+        t.add_argument(
+            "--jepa_mask_entry_target",
+            type=float,
+            default=0.10,
+            help="MLP target view: fraction of A entries masked (0 for clean target)",
+        )
+        t.add_argument(
+            "--jepa_mask_row_target",
+            type=float,
+            default=0.05,
+            help="MLP target view: fraction of constraint rows masked (0 for clean target)",
+        )
+        t.add_argument(
+            "--jepa_mask_col_target",
+            type=float,
+            default=0.05,
+            help="MLP target view: fraction of variable columns masked (0 for clean target)",
+        )
+
+        # GNN masking (node-level)
+        t.add_argument(
+            "--jepa_mask_ratio_nodes",
+            type=float,
+            default=0.3,
+            help="GNN: fraction of nodes masked",
+        )
+
+        # Augmentation options
+        t.add_argument(
+            "--jepa_noisy_mask",
+            action="store_true",
+            help="Add Gaussian noise at masked positions (vs hard zero masking)",
+        )
+        t.add_argument(
+            "--jepa_row_scaling",
+            action="store_true",
+            help="Apply row scaling augmentation: s_i ~ LogUniform(0.5, 2.0) to constraints",
+        )
+
+        # EMA momentum
+        t.add_argument(
+            "--ema_momentum",
+            type=float,
+            default=0.996,
+            help="Momentum for EMA target encoder (only used in EMA mode)",
+        )
+
         # Data
         d = parser.add_argument_group("data")
         d.add_argument(
