@@ -421,6 +421,9 @@ def train(overrides: Optional[Mapping] = None):
                 "optimizer": optimizer.state_dict(),
                 "args": vars(args),
             }
+            # Save target model state if using EMA mode
+            if target_model is not None:
+                ckpt["target_model"] = target_model.state_dict()
             torch.save(ckpt, save_dir / "last.pt")
 
             if val_loss < best_val:
