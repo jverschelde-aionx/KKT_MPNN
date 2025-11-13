@@ -93,6 +93,12 @@ def generate() -> None:
         "--norm_pos_feat", action="store_true", help="Normalize positional features"
     )
     d.add_argument(
+        "--normalize_features",
+        type=lambda x: x.lower() == "true",
+        default=True,
+        help="Apply min-max normalization to problem features (default: True)",
+    )
+    d.add_argument(
         "--gurobi_threads", type=int, default=4, help="Number of threads for Gurobi"
     )
     d.add_argument(
@@ -115,6 +121,7 @@ def generate() -> None:
         val_split=args.val_split,
         add_positional_features=args.add_pos_feat,
         normalize_positional_features=args.norm_pos_feat,
+        normalize_features=args.normalize_features,
         n_instances=args.n_instances,
         data_root=Path(args.data_root),
         solve=args.solve,
