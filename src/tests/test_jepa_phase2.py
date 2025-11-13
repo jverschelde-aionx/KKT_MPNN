@@ -49,7 +49,7 @@ class TestTrainingStateExtensions:
         assert state.jepa_loss_sum == pytest.approx(3.8)
 
         state.add_jepa_loss(0.7)
-        assert state.jepa_loss_sum == pytest.approx(5.0)
+        assert state.jepa_loss_sum == pytest.approx(4.5)  # 1.5 + 2.3 + 0.7 = 4.5
 
     def test_finish_epoch_returns_tuple(self):
         """Test that finish_epoch returns tuple of (training_loss, jepa_loss)"""
