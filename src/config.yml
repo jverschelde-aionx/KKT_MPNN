@@ -36,33 +36,21 @@ training:
   num_workers: 0
   log_every: 5
 
-  # JEPA (Joint-Embedding Predictive Architecture) self-supervised learning
-  use_jepa: false # Enable JEPA training (set to true to activate)
-  jepa_mode: "ema" # "ema" (EMA teacher, BYOL/I-JEPA) or "simsiam" (no EMA)
-  jepa_weight: 0.2 # Weight for JEPA loss (relative to KKT loss)
-  jepa_pretrain_epochs: 3 # JEPA-only pre-training epochs (0 for joint training from start)
+  # LeJEPA (Latent Embedding Joint-Embedding Predictive Architecture)
+  use_lejepa: true # Enable LeJEPA self-supervised training
+  lejepa_lambda: 0.05 # Weight for SIGReg regularization (λ)
+  lejepa_vg: 2 # Number of global views (lightly masked)
+  lejepa_vl: 2 # Number of local views (heavily masked)
+  sigreg_slices: 1024 # Number of slices for SIGReg regularizer
+  sigreg_points: 17 # Number of points for Epps-Pulley test
 
-  # LP-aware masking ratios (MLP)
-  # Online view (heavier mask - context)
-  jepa_mask_entry_online: 0.40 # Fraction of A entries masked
-  jepa_mask_row_online: 0.20 # Fraction of constraint rows masked
-  jepa_mask_col_online: 0.20 # Fraction of variable columns masked
-
-  # Target view (lighter mask or clean)
-  # Set to 0 for completely clean target
-  jepa_mask_entry_target: 0.10 # Fraction of A entries masked
-  jepa_mask_row_target: 0.05 # Fraction of constraint rows masked
-  jepa_mask_col_target: 0.05 # Fraction of variable columns masked
-
-  # GNN masking (node-level)
-  jepa_mask_ratio_nodes: 0.3 # Fraction of nodes masked
+  # Masking ratios for MLP (entry, row, col)
+  lejepa_global_mask: [0.10, 0.05, 0.05] # Global views: light masking
+  lejepa_local_mask: [0.40, 0.20, 0.20] # Local views: heavy masking
 
   # Augmentation options
-  jepa_noisy_mask: false # Use Gaussian noise at masked positions (vs zeros)
-  jepa_row_scaling: false # Apply row scaling augmentation (s_i ~ LogUniform(0.5, 2.0))
-
-  # EMA momentum
-  ema_momentum: 0.996 # Momentum for EMA target encoder (only used in EMA mode)
+  jepa_noisy_mask: false # Use Gaussian noise at masked positions
+  jepa_row_scaling: false # Apply row scaling augmentation
 
 testing:
   ckpt: exps/kkt_20251114_055905/best.pt
