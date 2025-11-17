@@ -1,5 +1,7 @@
 import torch
 
+from models.models import GNNPolicy, KKTNetMLP
+
 
 def get_primal_feasibility(
     x_pred: torch.Tensor, A: torch.Tensor, b: torch.Tensor, mask_m: torch.Tensor
@@ -98,3 +100,65 @@ def kkt_loss(
         "stationarity": weighted_stat.mean(),
         "complementary_slackness": weighted_comp.mean(),
     }
+
+
+def lejepa_pred_loss(emb_all, emb_global):
+    # emb_*: list of [B, D] tensors
+    centers = torch.stack(emb_global, 0).mean(0)  # [B, D]
+    return torch.stack([((z - centers) ** 2).mean() for z in emb_all]).mean()
+
+
+def lejepa_loss_mlp(model: KKTNetMLP, x_globals, x_all, sigreg, lambd=0.05):
+    """
+    LeJEPA loss for MLP architecture.
+
+    Args:
+        model: KKTNetMLP with LeJEPA components
+        x_globals: List of global views (lightly masked)
+        x_all: List of all views (globals + locals)
+        sigreg: SIGReg regularizer
+        lambd: Weight for regularization term (default: 0.05)
+
+    Returns:
+        Scalar loss: (1-λ) * L_pred + λ * L_reg
+    """
+    g = [model.lejepa_embed(x) for x in x_globals]  # lists of [B,D], no normalization
+    a = [model.lejepa_embed(x) for x in x_all]
+    l_pred = lejepa_pred_loss(a, g)
+    l_reg = torch.stack([sigreg(z) for z in a]).mean()
+    return (1 - lambd) * l_pred + lambd * l_reg
+
+
+def lejepa_loss_gnn(model: GNNPolicy, globals_, alls_, sigreg, lambd=0.05):
+    """
+    LeJEPA loss for GNN architecture.
+
+    Args:
+        model: GNNPolicy with LeJEPA components
+        globals_: List of global views (lightly masked graphs)
+        alls_: List of all views (globals + locals)
+        sigreg: SIGReg regularizer
+        lambd: Weight for regularization term (default: 0.05)
+
+    Returns:
+        Scalar loss: (1-λ) * L_pred + λ * L_reg
+    """
+    # globals_/alls_ are lists of PyG Batch objects (same batch order/size)
+    g = [
+        model.lejepa_embed_graph(
+            g.constraint_features, g.edge_index, g.edge_attr, g.variable_features
+        )
+        for g in globals_
+    ]  # each [B, D] after pooling per graph
+    a = [
+        model.lejepa_embed_graph(
+            g.constraint_features, g.edge_index, g.edge_attr, g.variable_features
+        )
+        for g in alls_
+    ]
+    # stack to [B, D] for each view
+    g = [x.squeeze(1) if x.dim() == 3 else x for x in g]
+    a = [x.squeeze(1) if x.dim() == 3 else x for x in a]
+    l_pred = lejepa_pred_loss(a, g)
+    l_reg = torch.stack([sigreg(z) for z in a]).mean()
+    return (1 - lambd) * l_pred + lambd * l_reg

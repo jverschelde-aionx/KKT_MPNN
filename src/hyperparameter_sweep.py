@@ -1,13 +1,14 @@
 """
 Hyperparameter Sweep for Model Scaling Experiments
 
-Tests model variants across problem sizes to measure JEPA impact and scaling behavior.
+Tests model variants across problem sizes to measure LeJEPA impact and scaling behavior.
 
-Model Variants (9 total):
-- MLP: Baseline, JEPA EMA, JEPA SimSiam (always normalized)
-- GNN: Baseline, JEPA EMA, JEPA SimSiam (normalized and unnormalized variants)
+Model Variants (5 total):
+- MLP: Baseline, LeJEPA
+- GNN: Baseline, LeJEPA (normalized and unnormalized variants)
 
 Note: normalize_features only applies to GNN (bipartite graph) data, not MLP.
+      LeJEPA uses heuristics-free approach (no EMA/SimSiam modes).
 
 Problem Scaling:
 - Types: RND (Random LP), CA (Combinatorial Auction)
@@ -77,40 +78,22 @@ def main():
         if "normalize_features" in model_cfg:
             flat_overrides["normalize_features"] = model_cfg["normalize_features"]
 
-        # JEPA configuration
-        if model_cfg.get("use_jepa", False):
-            flat_overrides["use_jepa"] = True
-            flat_overrides["jepa_mode"] = model_cfg.get("jepa_mode", "ema")
-            flat_overrides["jepa_weight"] = model_cfg.get("jepa_weight", 0.2)
-            flat_overrides["jepa_pretrain_epochs"] = model_cfg.get(
-                "jepa_pretrain_epochs", 3
-            )
+        # LeJEPA configuration
+        if model_cfg.get("use_lejepa", False):
+            flat_overrides["use_lejepa"] = True
+            flat_overrides["lejepa_lambda"] = model_cfg.get("lejepa_lambda", 0.05)
+            flat_overrides["lejepa_vg"] = model_cfg.get("lejepa_vg", 2)
+            flat_overrides["lejepa_vl"] = model_cfg.get("lejepa_vl", 2)
+            flat_overrides["sigreg_slices"] = model_cfg.get("sigreg_slices", 1024)
+            flat_overrides["sigreg_points"] = model_cfg.get("sigreg_points", 17)
 
-            if model_cfg.get("use_bipartite_graphs"):
-                # GNN masking
-                flat_overrides["jepa_mask_ratio_nodes"] = model_cfg.get(
-                    "jepa_mask_ratio_nodes", 0.3
-                )
-            else:
-                # MLP masking
-                flat_overrides["jepa_mask_entry_online"] = model_cfg.get(
-                    "jepa_mask_entry_online", 0.40
-                )
-                flat_overrides["jepa_mask_row_online"] = model_cfg.get(
-                    "jepa_mask_row_online", 0.20
-                )
-                flat_overrides["jepa_mask_col_online"] = model_cfg.get(
-                    "jepa_mask_col_online", 0.20
-                )
-                flat_overrides["jepa_mask_entry_target"] = model_cfg.get(
-                    "jepa_mask_entry_target", 0.10
-                )
-                flat_overrides["jepa_mask_row_target"] = model_cfg.get(
-                    "jepa_mask_row_target", 0.05
-                )
-                flat_overrides["jepa_mask_col_target"] = model_cfg.get(
-                    "jepa_mask_col_target", 0.05
-                )
+            # Masking configuration (applies to both MLP and GNN)
+            flat_overrides["lejepa_global_mask"] = model_cfg.get(
+                "lejepa_global_mask", [0.10, 0.05, 0.05]
+            )
+            flat_overrides["lejepa_local_mask"] = model_cfg.get(
+                "lejepa_local_mask", [0.40, 0.20, 0.20]
+            )
 
     # Training configuration
     if "training" in overrides:
@@ -130,95 +113,64 @@ def main():
 
 MODEL_VARIANTS = {
     # =========================================================================
-    # Baseline Models (No JEPA)
+    # Baseline Models (No LeJEPA)
     # =========================================================================
     "mlp_baseline": {
         "use_bipartite_graphs": False,
-        "use_jepa": False,
+        "use_lejepa": False,
         "normalize_features": True,  # MLP always uses normalized data
     },
     "gnn_baseline_norm": {
         "use_bipartite_graphs": True,
-        "use_jepa": False,
+        "use_lejepa": False,
         "normalize_features": True,
     },
     "gnn_baseline_unnorm": {
         "use_bipartite_graphs": True,
-        "use_jepa": False,
+        "use_lejepa": False,
         "normalize_features": False,
     },
     # =========================================================================
-    # JEPA Models - MLP (always normalized)
+    # LeJEPA Models - MLP (always normalized)
     # =========================================================================
-    "mlp_jepa_ema": {
+    "mlp_lejepa": {
         "use_bipartite_graphs": False,
-        "use_jepa": True,
-        "jepa_mode": "ema",
-        "jepa_weight": 0.2,
-        "jepa_pretrain_epochs": 10,
+        "use_lejepa": True,
+        "lejepa_lambda": 0.05,  # SIGReg weight
+        "lejepa_vg": 2,  # Number of global views
+        "lejepa_vl": 2,  # Number of local views
+        "sigreg_slices": 1024,
+        "sigreg_points": 17,
         "normalize_features": True,  # MLP always uses normalized data
-        "jepa_mask_entry_online": 0.40,
-        "jepa_mask_row_online": 0.20,
-        "jepa_mask_col_online": 0.20,
-        "jepa_mask_entry_target": 0.10,
-        "jepa_mask_row_target": 0.05,
-        "jepa_mask_col_target": 0.05,
-    },
-    "mlp_jepa_simsiam": {
-        "use_bipartite_graphs": False,
-        "use_jepa": True,
-        "jepa_mode": "simsiam",
-        "jepa_weight": 0.2,
-        "jepa_pretrain_epochs": 0,
-        "normalize_features": True,  # MLP always uses normalized data
-        "jepa_mask_entry_online": 0.40,
-        "jepa_mask_row_online": 0.20,
-        "jepa_mask_col_online": 0.20,
-        "jepa_mask_entry_target": 0.10,
-        "jepa_mask_row_target": 0.05,
-        "jepa_mask_col_target": 0.05,
+        "lejepa_global_mask": [0.10, 0.05, 0.05],  # (entry, row, col)
+        "lejepa_local_mask": [0.40, 0.20, 0.20],
     },
     # =========================================================================
-    # JEPA Models - GNN with EMA
+    # LeJEPA Models - GNN (normalized and unnormalized)
     # =========================================================================
-    "gnn_jepa_ema_norm": {
+    "gnn_lejepa_norm": {
         "use_bipartite_graphs": True,
-        "use_jepa": True,
-        "jepa_mode": "ema",
-        "jepa_weight": 0.2,
-        "jepa_pretrain_epochs": 10,
+        "use_lejepa": True,
+        "lejepa_lambda": 0.05,
+        "lejepa_vg": 2,
+        "lejepa_vl": 2,
+        "sigreg_slices": 1024,
+        "sigreg_points": 17,
         "normalize_features": True,
-        "jepa_mask_ratio_nodes": 0.3,
+        "lejepa_global_mask": [0.10, 0.05, 0.05],
+        "lejepa_local_mask": [0.40, 0.20, 0.20],
     },
-    "gnn_jepa_ema_unnorm": {
+    "gnn_lejepa_unnorm": {
         "use_bipartite_graphs": True,
-        "use_jepa": True,
-        "jepa_mode": "ema",
-        "jepa_weight": 0.2,
-        "jepa_pretrain_epochs": 10,
+        "use_lejepa": True,
+        "lejepa_lambda": 0.05,
+        "lejepa_vg": 2,
+        "lejepa_vl": 2,
+        "sigreg_slices": 1024,
+        "sigreg_points": 17,
         "normalize_features": False,
-        "jepa_mask_ratio_nodes": 0.3,
-    },
-    # =========================================================================
-    # JEPA Models - GNN with SimSiam
-    # =========================================================================
-    "gnn_jepa_simsiam_norm": {
-        "use_bipartite_graphs": True,
-        "use_jepa": True,
-        "jepa_mode": "simsiam",
-        "jepa_weight": 0.2,
-        "jepa_pretrain_epochs": 0,
-        "normalize_features": True,
-        "jepa_mask_ratio_nodes": 0.3,
-    },
-    "gnn_jepa_simsiam_unnorm": {
-        "use_bipartite_graphs": True,
-        "use_jepa": True,
-        "jepa_mode": "simsiam",
-        "jepa_weight": 0.2,
-        "jepa_pretrain_epochs": 0,
-        "normalize_features": False,
-        "jepa_mask_ratio_nodes": 0.3,
+        "lejepa_global_mask": [0.10, 0.05, 0.05],
+        "lejepa_local_mask": [0.40, 0.20, 0.20],
     },
 }
 
@@ -337,8 +289,8 @@ def export_results_to_excel(
             if config.get("model", {}).get("use_bipartite_graphs")
             else "MLP",
             "normalized": config.get("model", {}).get("normalize_features", True),
-            "use_jepa": config.get("model", {}).get("use_jepa", False),
-            "jepa_mode": config.get("model", {}).get("jepa_mode", ""),
+            "use_lejepa": config.get("model", {}).get("use_lejepa", False),
+            "lejepa_lambda": config.get("model", {}).get("lejepa_lambda", ""),
             # Training configuration
             "epochs": config.get("training", {}).get("epochs", ""),
             "batch_size": config.get("training", {}).get("batch_size", ""),
@@ -348,7 +300,7 @@ def export_results_to_excel(
             "final_valid_loss": summary.get("valid/loss", ""),
             "best_valid_loss": summary.get("best_valid_loss", ""),
             "final_train_loss_kkt": summary.get("train/loss_kkt", ""),
-            "final_train_loss_jepa": summary.get("train/loss_jepa", ""),
+            "final_train_loss_lejepa": summary.get("train/loss_lejepa", ""),
             # KKT components
             "final_primal": summary.get("valid/primal", ""),
             "final_dual": summary.get("valid/dual", ""),
@@ -417,7 +369,7 @@ if __name__ == "__main__":
         "--model-variants",
         nargs="+",
         default=None,
-        help="Model variants to test (default: all 12 variants)",
+        help="Model variants to test (default: all 5 variants)",
     )
     parser.add_argument(
         "--export-file",
