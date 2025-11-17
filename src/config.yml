@@ -1,10 +1,10 @@
 data:
-  problems: ["CA"]
+  problems: ["RND", "CA"]
   is_sizes: [2]
-  ca_sizes: [5]
+  ca_sizes: [2, 5, 10, 20, 50, 100]
   sc_sizes: [2]
   cfl_sizes: [5]
-  rnd_sizes: [2]
+  rnd_sizes: [2, 5, 10]
   test_split: 0.15
   val_split: 0.15
   n_instances: 7000
@@ -23,7 +23,7 @@ gnn_policy:
   num_emb_freqs: 16
 
 training:
-  use_bipartite_graphs: false
+  use_bipartite_graphs: true
   devices: "0"
   batch_size: 256
   epochs: 200
@@ -36,8 +36,36 @@ training:
   num_workers: 0
   log_every: 5
 
+  # JEPA (Joint-Embedding Predictive Architecture) self-supervised learning
+  use_jepa: false # Enable JEPA training (set to true to activate)
+  jepa_mode: "ema" # "ema" (EMA teacher, BYOL/I-JEPA) or "simsiam" (no EMA)
+  jepa_weight: 0.2 # Weight for JEPA loss (relative to KKT loss)
+  jepa_pretrain_epochs: 3 # JEPA-only pre-training epochs (0 for joint training from start)
+
+  # LP-aware masking ratios (MLP)
+  # Online view (heavier mask - context)
+  jepa_mask_entry_online: 0.40 # Fraction of A entries masked
+  jepa_mask_row_online: 0.20 # Fraction of constraint rows masked
+  jepa_mask_col_online: 0.20 # Fraction of variable columns masked
+
+  # Target view (lighter mask or clean)
+  # Set to 0 for completely clean target
+  jepa_mask_entry_target: 0.10 # Fraction of A entries masked
+  jepa_mask_row_target: 0.05 # Fraction of constraint rows masked
+  jepa_mask_col_target: 0.05 # Fraction of variable columns masked
+
+  # GNN masking (node-level)
+  jepa_mask_ratio_nodes: 0.3 # Fraction of nodes masked
+
+  # Augmentation options
+  jepa_noisy_mask: false # Use Gaussian noise at masked positions (vs zeros)
+  jepa_row_scaling: false # Apply row scaling augmentation (s_i ~ LogUniform(0.5, 2.0))
+
+  # EMA momentum
+  ema_momentum: 0.996 # Momentum for EMA target encoder (only used in EMA mode)
+
 testing:
-  ckpt: exps/kkt_20251020_203603/best.pt
-  file_path: data/instances/RND/instance/test/5/RND-5-0012.lp
+  ckpt: exps/kkt_20251114_055905/best.pt
+  file_path: data/instances/RND/BG/test/10/RND-10-0012.lp.bg
   out_dir: outputs
   device: "0"

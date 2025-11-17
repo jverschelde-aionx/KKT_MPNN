@@ -1,0 +1,167 @@
+# ============================================================================
+# JEPA MLP Training with EMA (Mode 3: Pre-train → Joint Training)
+# ============================================================================
+# Uses MLP architecture with JEPA self-supervised pre-training.
+# EMA mode: Separate target encoder updated via exponential moving average.
+# Mode 3: Pre-train for N epochs (JEPA-only), then joint KKT+JEPA training.
+#
+# This is the RECOMMENDED configuration for best results.
+#
+# Usage: python train.py --config configs/config_jepa_mlp_ema.yml
+# ============================================================================
+
+data:
+  # Problem types to generate/train on
+  problems: ["CA"]              # Combinatorial Auction problems
+  is_sizes: [2]                 # Independent Set sizes
+  ca_sizes: [5]                 # CA problem sizes (5 items)
+  sc_sizes: [2]                 # Set Cover sizes
+  cfl_sizes: [5]                # Capacitated Facility Location sizes
+  rnd_sizes: [2]                # Random LP sizes
+
+  # Data splits
+  test_split: 0.15              # 15% for test set
+  val_split: 0.15               # 15% for validation set
+  # Remaining 70% for training
+
+  # Dataset size
+  n_instances: 7000             # Total instances to generate
+
+  # Paths
+  data_root: ./data/instances   # Root directory for generated instances
+
+  # Solver settings
+  solve: true                   # Solve instances with Gurobi to get optimal solutions
+  gurobi_threads: 4             # Number of threads for Gurobi solver
+
+  # System
+  n_jobs: 32                    # Parallel jobs for data generation
+
+# GNN architecture settings (not used for MLP configuration)
+gnn_policy:
+  embedding_size: 128           # Dimension of node embeddings
+  cons_nfeats: 4                # Number of constraint node features
+  edge_nfeats: 1                # Number of edge features
+  var_nfeats: 18                # Number of variable node features
+  num_emb_type: periodic        # Numeric embedding type: "periodic", "pwl", or "linear"
+  num_emb_bins: 32              # Bins for piecewise-linear embeddings
+  num_emb_freqs: 16             # Frequencies for periodic embeddings
+
+# Training settings
+training:
+  # Model architecture
+  use_bipartite_graphs: false   # false = MLP (this config), true = GNN
+
+  # Hardware
+  devices: "0"                  # GPU device IDs (comma-separated)
+
+  # Optimization
+  batch_size: 256               # Batch size for training
+  epochs: 200                   # Total training epochs (includes pre-training)
+  lr: 0.001                     # Learning rate (Adam optimizer)
+  seed: 42                      # Random seed for reproducibility
+
+  # KKT loss weights (used after pre-training)
+  primal_weight: 0.1                        # Primal feasibility: Ax ≤ b
+  dual_weight: 0.1                          # Dual feasibility: λ ≥ 0
+  stationarity_weight: 0.6                  # Stationarity: c + A^T λ = 0
+  complementary_slackness_weight: 0.2       # Complementary slackness: λ·(Ax-b) = 0
+
+  # Logging
+  num_workers: 0                # DataLoader workers (0 = main process only)
+  log_every: 5                  # Log metrics every N batches
+
+  # =========================================================================
+  # JEPA: ENABLED with EMA mode
+  # =========================================================================
+  use_jepa: true                # Enable JEPA self-supervised learning
+
+  # JEPA mode selection
+  jepa_mode: "ema"              # EMA (BYOL/I-JEPA style): separate target encoder
+                                 # More stable, better accuracy, prevents collapse
+                                 # Requires 2x memory (online + target models)
+
+  # Training schedule (Mode 3: Pre-train → Joint)
+  jepa_pretrain_epochs: 3       # First 3 epochs: JEPA-only (representation learning)
+                                 # Remaining epochs: KKT + JEPA joint training
+                                 # For longer pre-training, use 10-50 epochs
+
+  jepa_weight: 0.2              # Weight for JEPA loss during joint training
+                                 # Total loss = KKT_loss + 0.2 * JEPA_loss
+                                 # Helps maintain good representations during task training
+
+  # =========================================================================
+  # LP-aware Masking Strategy (MLP)
+  # =========================================================================
+  # Creates two asymmetric views:
+  # - Online view (context): Heavily masked for prediction task
+  # - Target view: Lightly masked or clean for stable target embeddings
+  #
+  # Masking respects LP structure:
+  # - Row masking: Masks entire constraint (A[i,:] + b[i])
+  # - Column masking: Masks entire variable (A[:,j] + c[j])
+  # - Entry masking: Individual A[i,j] coefficients
+
+  # Online view (context - heavier mask)
+  jepa_mask_entry_online: 0.40  # 40% of A entries masked
+  jepa_mask_row_online: 0.20    # 20% of constraint rows masked
+  jepa_mask_col_online: 0.20    # 20% of variable columns masked
+                                 # Result: ~60-70% of A matrix masked
+                                 # Forces model to infer structure from partial info
+
+  # Target view (lighter mask)
+  jepa_mask_entry_target: 0.10  # 10% of A entries masked
+  jepa_mask_row_target: 0.05    # 5% of constraint rows masked
+  jepa_mask_col_target: 0.05    # 5% of variable columns masked
+                                 # Result: ~15-20% of A matrix masked
+                                 # For completely clean target, set all to 0.0
+
+  # GNN masking (not used for MLP, but included for completeness)
+  jepa_mask_ratio_nodes: 0.3    # 30% of nodes masked (if using GNN)
+
+  # =========================================================================
+  # Augmentation Options (optional, can improve robustness)
+  # =========================================================================
+  jepa_noisy_mask: false        # false: Use zeros at masked positions
+                                 # true: Add Gaussian noise (ε ~ N(0, 0.01*median|A|))
+                                 # Noisy masking can improve robustness
+
+  jepa_row_scaling: false       # false: No row scaling
+                                 # true: Scale constraints by s_i ~ LogUniform(0.5, 2.0)
+                                 # Teaches invariance to equivalent problem formulations
+                                 # (Ax ≤ b ⟺ SAx ≤ Sb for diagonal S > 0)
+
+  # =========================================================================
+  # EMA Settings (only used in EMA mode)
+  # =========================================================================
+  ema_momentum: 0.996           # Momentum for EMA target encoder update
+                                 # Higher (e.g., 0.999): Slower updates, more stable
+                                 # Lower (e.g., 0.99): Faster updates, less stable
+                                 # 0.996 is standard for vision tasks (BYOL, I-JEPA)
+
+# Testing/evaluation settings
+testing:
+  ckpt: exps/kkt_jepa_mlp_ema/best.pt       # Path to checkpoint for evaluation
+  file_path: data/instances/CA/instance/test/5/CA-5-0001.lp  # Single instance for testing
+  out_dir: outputs                           # Output directory for test results
+  device: "0"                                # GPU device for testing
+
+# ============================================================================
+# Expected Behavior
+# ============================================================================
+# Epochs 1-3:   JEPA-only training (train/loss_jepa logged)
+#               Model learns representations of LP problem structure
+#               No KKT loss optimization
+#
+# Epochs 4-200: Joint KKT + JEPA training
+#               train/loss_kkt:  Task-specific KKT loss
+#               train/loss_jepa: Self-supervised representation maintenance
+#               train/loss:      Combined loss = KKT + 0.2*JEPA
+#
+# Checkpoints:  Saves both online_model and target_model state_dict
+#               Can resume training with full EMA state
+#
+# Memory:       ~2x baseline (online + target models)
+# Training:     Slightly slower than baseline due to dual forward passes
+# Results:      Expect improved KKT loss convergence and solution quality
+# ============================================================================

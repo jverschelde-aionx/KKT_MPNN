@@ -1,5 +1,6 @@
 import os
 import random
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -14,6 +15,7 @@ from torch.utils.data import DataLoader
 import wandb
 from data.common import ProblemClass
 from data.datasets import GraphDataset, LPDataset, make_pad_collate, pad_collate_graphs
+from models.jepa_utils import ema_update, jepa_loss_gnn, jepa_loss_mlp, make_gnn_views, make_lp_jepa_views
 from models.losses import kkt_loss
 from models.models import GNNPolicy, KKTNetMLP
 
@@ -23,6 +25,7 @@ class TrainingState:
         self.steps = 0
         self.trained_items = 0
         self.training_loss_sum = 0.0
+        self.jepa_loss_sum = 0.0  # Track JEPA loss separately
         self.epoch = 0
         self.best_epoch = 0
         self.log_every = log_every
@@ -34,15 +37,30 @@ class TrainingState:
 
         self.training_loss_sum += loss
 
-    def finish_epoch(self) -> float:
+    def add_jepa_loss(self, loss: float):
+        """Add JEPA loss to running sum for epoch averaging."""
+        self.jepa_loss_sum += loss
+
+    def finish_epoch(self) -> Tuple[float, Optional[float]]:
+        """
+        Finish the current epoch and return average losses.
+
+        Returns:
+            (training_loss, jepa_loss): Tuple of average losses
+            jepa_loss is None if JEPA is not being used
+        """
         training_loss = self.training_loss_sum / self.trained_items
+        jepa_loss = (
+            self.jepa_loss_sum / self.trained_items if self.jepa_loss_sum > 0 else None
+        )
         self._reset_training_state()
         self._increment_epoch()
-        return training_loss
+        return training_loss, jepa_loss
 
     def _reset_training_state(self):
         self.trained_items = 0
         self.training_loss_sum = 0.0
+        self.jepa_loss_sum = 0.0
 
     def _increment_epoch(self):
         self.epoch += 1
@@ -100,6 +118,90 @@ def train(overrides: Optional[Mapping] = None):
             type=int,
             default=50,
             help="Log lightweight scalars every N steps.",
+        )
+
+        # JEPA (Joint-Embedding Predictive Architecture)
+        t.add_argument("--use_jepa", action="store_true", help="Enable JEPA self-supervised training")
+        t.add_argument(
+            "--jepa_mode",
+            choices=["ema", "simsiam"],
+            default="ema",
+            help="JEPA mode: EMA teacher (BYOL/I-JEPA) or SimSiam (no EMA)",
+        )
+        t.add_argument("--jepa_weight", type=float, default=0.2, help="Weight for JEPA loss (relative to KKT loss)")
+        t.add_argument(
+            "--jepa_pretrain_epochs",
+            type=int,
+            default=3,
+            help="Number of JEPA-only pre-training epochs before joint KKT+JEPA training (0 for joint from start)",
+        )
+
+        # LP-aware masking for MLP (online/context view - heavier mask)
+        t.add_argument(
+            "--jepa_mask_entry_online",
+            type=float,
+            default=0.40,
+            help="MLP online view: fraction of A entries masked",
+        )
+        t.add_argument(
+            "--jepa_mask_row_online",
+            type=float,
+            default=0.20,
+            help="MLP online view: fraction of constraint rows masked",
+        )
+        t.add_argument(
+            "--jepa_mask_col_online",
+            type=float,
+            default=0.20,
+            help="MLP online view: fraction of variable columns masked",
+        )
+
+        # LP-aware masking for MLP (target view - lighter or clean mask)
+        t.add_argument(
+            "--jepa_mask_entry_target",
+            type=float,
+            default=0.10,
+            help="MLP target view: fraction of A entries masked (0 for clean target)",
+        )
+        t.add_argument(
+            "--jepa_mask_row_target",
+            type=float,
+            default=0.05,
+            help="MLP target view: fraction of constraint rows masked (0 for clean target)",
+        )
+        t.add_argument(
+            "--jepa_mask_col_target",
+            type=float,
+            default=0.05,
+            help="MLP target view: fraction of variable columns masked (0 for clean target)",
+        )
+
+        # GNN masking (node-level)
+        t.add_argument(
+            "--jepa_mask_ratio_nodes",
+            type=float,
+            default=0.3,
+            help="GNN: fraction of nodes masked",
+        )
+
+        # Augmentation options
+        t.add_argument(
+            "--jepa_noisy_mask",
+            action="store_true",
+            help="Add Gaussian noise at masked positions (vs hard zero masking)",
+        )
+        t.add_argument(
+            "--jepa_row_scaling",
+            action="store_true",
+            help="Apply row scaling augmentation: s_i ~ LogUniform(0.5, 2.0) to constraints",
+        )
+
+        # EMA momentum
+        t.add_argument(
+            "--ema_momentum",
+            type=float,
+            default=0.996,
+            help="Momentum for EMA target encoder (only used in EMA mode)",
         )
 
         # Data
@@ -253,6 +355,15 @@ def train(overrides: Optional[Mapping] = None):
             if args.use_bipartite_graphs
             else KKTNetMLP(M_max, N_max).to(device)
         )
+
+        # Create optional EMA target model for JEPA training
+        target_model = None
+        if args.use_jepa and args.jepa_mode == "ema":
+            target_model = deepcopy(model)
+            for p in target_model.parameters():
+                p.requires_grad_(False)
+            logger.info("Created EMA target model for JEPA training")
+
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
         save_dir = Path("exps") / run_name
@@ -270,7 +381,7 @@ def train(overrides: Optional[Mapping] = None):
 
         # Train loop
         for epoch in range(1, args.epochs + 1):
-            train_loss = train_epoch(
+            train_loss, train_jepa_loss = train_epoch(
                 model=model,
                 loader=train_loader,
                 optimizer=optimizer,
@@ -280,6 +391,8 @@ def train(overrides: Optional[Mapping] = None):
                 dual_weight=args.dual_weight,
                 stationarity_weight=args.stationarity_weight,
                 complementary_slackness_weight=args.complementary_slackness_weight,
+                args=args,
+                target_model=target_model,
             )
 
             val_loss, validation_metrics = eval_epoch(
@@ -293,16 +406,16 @@ def train(overrides: Optional[Mapping] = None):
             )
 
             # logging
-            wandb.log(
-                {
-                    "epoch": epoch,
-                    "train/loss": train_loss,
-                    "valid/loss": val_loss,
-                    "lr": optimizer.param_groups[0]["lr"],
-                    **validation_metrics,
-                },
-                step=training_state.get_step(),
-            )
+            log_dict = {
+                "epoch": epoch,
+                "train/loss": train_loss,
+                "valid/loss": val_loss,
+                "lr": optimizer.param_groups[0]["lr"],
+                **validation_metrics,
+            }
+            if train_jepa_loss is not None:
+                log_dict["train/loss_jepa_epoch"] = train_jepa_loss
+            wandb.log(log_dict, step=training_state.get_step())
 
             # Model checkpointing
             ckpt = {
@@ -311,6 +424,9 @@ def train(overrides: Optional[Mapping] = None):
                 "optimizer": optimizer.state_dict(),
                 "args": vars(args),
             }
+            # Save target model state if using EMA mode
+            if target_model is not None:
+                ckpt["target_model"] = target_model.state_dict()
             torch.save(ckpt, save_dir / "last.pt")
 
             if val_loss < best_val:
@@ -357,7 +473,9 @@ def train_epoch(
     dual_weight: float,
     stationarity_weight: float,
     complementary_slackness_weight: float,
-) -> float:
+    args=None,
+    target_model=None,
+) -> Tuple[float, Optional[float]]:
     model.train()
     for batch in loader:
         if isinstance(batch[0], torch_geometric.data.Batch):
@@ -386,7 +504,7 @@ def train_epoch(
             A, b, c = A.to(device), b.to(device), c.to(device)
             mask_m, mask_n = mask_m.to(device), mask_n.to(device)
             y_pred = model(model_input)
-        loss, _ = kkt_loss(
+        loss_kkt, _ = kkt_loss(
             y_pred=y_pred,
             A=A,
             b=b,
@@ -398,9 +516,84 @@ def train_epoch(
             stationarity_weight=stationarity_weight,
             complementary_slackness_weight=complementary_slackness_weight,
         )
+
+        # JEPA loss computation (if enabled)
+        loss_jepa = None
+        if args and args.use_jepa:
+            current_epoch = training_state.get_epoch()
+            jepa_only = current_epoch < args.jepa_pretrain_epochs
+
+            if isinstance(batch[0], torch_geometric.data.Batch):
+                # GNN path: create node-level masked views
+                # Note: make_gnn_views returns both ctx (masked) and tgt (clean) in one call
+                ctx_graph, tgt_graph, mask_cons, mask_vars = make_gnn_views(
+                    batch_graph, mask_ratio=args.jepa_mask_ratio_nodes
+                )
+                loss_jepa = jepa_loss_gnn(
+                    online_model=model,
+                    target_model=target_model,
+                    ctx_graph=ctx_graph,
+                    tgt_graph=tgt_graph,
+                    mask_cons=mask_cons,
+                    mask_vars=mask_vars,
+                    mode=args.jepa_mode,
+                )
+            else:
+                # MLP path: create LP-aware asymmetric views
+                x_online, x_target = make_lp_jepa_views(
+                    A=A,
+                    b=b,
+                    c=c,
+                    mask_m=mask_m,
+                    mask_n=mask_n,
+                    r_entry_on=args.jepa_mask_entry_online,
+                    r_row_on=args.jepa_mask_row_online,
+                    r_col_on=args.jepa_mask_col_online,
+                    r_entry_tg=args.jepa_mask_entry_target,
+                    r_row_tg=args.jepa_mask_row_target,
+                    r_col_tg=args.jepa_mask_col_target,
+                    noisy_mask=args.jepa_noisy_mask,
+                    row_scaling=args.jepa_row_scaling,
+                )
+                loss_jepa = jepa_loss_mlp(
+                    online_model=model,
+                    target_model=target_model,
+                    x_online=x_online,
+                    x_target=x_target,
+                    mode=args.jepa_mode,
+                )
+
+            # Track JEPA loss separately
+            training_state.add_jepa_loss(loss_jepa.item())
+
+            # Log JEPA and KKT losses to WandB
+            wandb.log(
+                {
+                    "train/loss_jepa": loss_jepa.item(),
+                    "train/loss_kkt": loss_kkt.item(),
+                },
+                step=training_state.get_step(),
+            )
+
+            # Combine losses based on training schedule
+            if jepa_only:
+                # Pre-training: JEPA loss only
+                loss = loss_jepa
+            else:
+                # Joint training: weighted combination
+                loss = loss_kkt + args.jepa_weight * loss_jepa
+        else:
+            # No JEPA: use KKT loss only
+            loss = loss_kkt
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        # Update target encoder with EMA (if using EMA mode)
+        if args and args.use_jepa and args.jepa_mode == "ema" and target_model is not None:
+            ema_update(target_model, model, m=args.ema_momentum)
+
         training_state.add_training_step(loss)
 
     return training_state.finish_epoch()

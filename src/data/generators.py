@@ -463,6 +463,7 @@ def generate_instances(settings: Settings) -> None:
                             lp_path,
                             settings.add_positional_features,
                             settings.normalize_positional_features,
+                            settings.normalize_features,
                         )
                     except Exception as e:
                         logger.error("Failed on {} – {}", lp_path, e)
@@ -522,7 +523,10 @@ def encode_ranks_as_bits(
 
 
 def get_bipartite_graph(
-    lp_path: Path, add_pos_feat: bool = True, normalize_pos_feat: bool = False
+    lp_path: Path,
+    add_pos_feat: bool = True,
+    normalize_pos_feat: bool = False,
+    normalize_features: bool = True,
 ) -> Tuple:
     # load model
     problem = scp.Model()
@@ -729,20 +733,25 @@ def get_bipartite_graph(
     ).coalesce()
     b_vec = torch.tensor(b_leq, dtype=torch.float32)
 
-    if add_pos_feat and not normalize_pos_feat:
-        # normalize only first 6 numeric features, keep 20 bits crisp {0,1}
-        v_num, v_bits = v_nodes[:, :6], v_nodes[:, 6:]
-        v_num = _minmax_normalization(v_num).clamp_(1e-5, 1.0)
-        v_nodes = torch.cat([v_num, v_bits], dim=1)
-    else:
-        # normalize everything (numeric + bits, or numeric only if no pos bits)
-        v_nodes = _minmax_normalization(v_nodes).clamp_(1e-5, 1.0)
+    if normalize_features:
+        # Apply min-max normalization to features
+        if add_pos_feat and not normalize_pos_feat:
+            # normalize only first 6 numeric features, keep 20 bits crisp {0,1}
+            v_num, v_bits = v_nodes[:, :6], v_nodes[:, 6:]
+            v_num = _minmax_normalization(v_num).clamp_(1e-5, 1.0)
+            v_nodes = torch.cat([v_num, v_bits], dim=1)
+        else:
+            # normalize everything (numeric + bits, or numeric only if no pos bits)
+            v_nodes = _minmax_normalization(v_nodes).clamp_(1e-5, 1.0)
 
-    c_nodes = (
-        _minmax_normalization(c_nodes).clamp_(1e-5, 1.0)
-        if c_nodes.numel() > 0
-        else c_nodes
-    )
+        c_nodes = (
+            _minmax_normalization(c_nodes).clamp_(1e-5, 1.0)
+            if c_nodes.numel() > 0
+            else c_nodes
+        )
+    else:
+        # Normalization disabled - using raw features
+        logger.info("Normalization disabled - using raw features")
 
     # attach artifacts to A
     # (So they can be accessed later without changing the return signature.)

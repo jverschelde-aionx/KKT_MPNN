@@ -7,7 +7,7 @@ from torch import nn
 
 
 class KKTNetMLP(nn.Module):
-    def __init__(self, m: int, n: int, hidden=256):
+    def __init__(self, m: int, n: int, hidden=256, jepa_embed_dim=128):
         super().__init__()
         self.m = m
         self.n = n
@@ -25,19 +25,83 @@ class KKTNetMLP(nn.Module):
         self.head_lam = nn.Sequential(
             nn.Linear(hidden, 64), nn.SELU(), nn.Linear(64, m)
         )
-        # lambdas must be >= 0 per dual feasibility; we’ll ReLU at loss-time OR here:
+        # lambdas must be >= 0 per dual feasibility; we'll ReLU at loss-time OR here:
         self.relu = nn.ReLU()
+
+        # JEPA components: projector and predictor
+        # Projector: hidden → embedding (applied to both online and target)
+        self.jepa_proj = nn.Sequential(
+            nn.Linear(hidden, hidden // 2),
+            nn.ReLU(),
+            nn.Linear(hidden // 2, jepa_embed_dim)
+        )
+        # Predictor: embedding → prediction (online only)
+        self.jepa_pred_net = nn.Sequential(
+            nn.Linear(jepa_embed_dim, hidden // 2),
+            nn.ReLU(),
+            nn.Linear(hidden // 2, jepa_embed_dim)
+        )
+
+    def encode_trunk(self, flat_input):
+        """
+        Encode input to hidden representation (before task heads).
+
+        Args:
+            flat_input: [B, m*n + m + n]
+
+        Returns:
+            z: Hidden representation [B, hidden_dim]
+        """
+        return self.net(flat_input)
 
     def forward(self, flat_input):
         """
-        flat_input: [B, m*n + m + n]
-        returns: y_pred [B, n+m] = [x_pred, lambda_pred]
+        Standard forward pass for KKT prediction.
+
+        Args:
+            flat_input: [B, m*n + m + n]
+
+        Returns:
+            y_pred: [B, n+m] = [x_pred, lambda_pred]
         """
-        z = self.net(flat_input)
+        z = self.encode_trunk(flat_input)
         x = self.head_x(z)  # [B, n]
         lam = self.head_lam(z)  # [B, m]
         lam = self.relu(lam)  # enforce non-negativity at the output
         return torch.cat([x, lam], dim=-1)
+
+    def jepa_embed(self, flat_input):
+        """
+        JEPA embedding: encode → project → L2-normalize.
+
+        This method is used for both online and target encoders in JEPA training.
+
+        Args:
+            flat_input: [B, m*n + m + n]
+
+        Returns:
+            z: L2-normalized embedding [B, jepa_embed_dim]
+        """
+        z = self.encode_trunk(flat_input)
+        z_proj = self.jepa_proj(z)
+        z_norm = torch.nn.functional.normalize(z_proj, dim=-1)  # L2-normalize
+        return z_norm
+
+    def jepa_pred(self, z):
+        """
+        JEPA prediction: predict → L2-normalize.
+
+        This method is only used for the online encoder (not target).
+
+        Args:
+            z: Embedding from jepa_embed [B, jepa_embed_dim]
+
+        Returns:
+            p: L2-normalized prediction [B, jepa_embed_dim]
+        """
+        p = self.jepa_pred_net(z)
+        p_norm = torch.nn.functional.normalize(p, dim=-1)  # L2-normalize
+        return p_norm
 
 
 class GNNPolicy(torch.nn.Module):
@@ -149,6 +213,31 @@ class GNNPolicy(torch.nn.Module):
         )
         self.lambda_act = nn.Softplus()  # smooth ≥0
 
+        # JEPA components: per-node projectors and predictors
+        jepa_embed_dim = 128
+        # Constraint node projector and predictor
+        self.cons_jepa_proj = nn.Sequential(
+            nn.Linear(d_out, d_out // 2),
+            nn.ReLU(),
+            nn.Linear(d_out // 2, jepa_embed_dim)
+        )
+        self.cons_jepa_pred = nn.Sequential(
+            nn.Linear(jepa_embed_dim, d_out // 2),
+            nn.ReLU(),
+            nn.Linear(d_out // 2, jepa_embed_dim)
+        )
+        # Variable node projector and predictor
+        self.var_jepa_proj = nn.Sequential(
+            nn.Linear(d_out, d_out // 2),
+            nn.ReLU(),
+            nn.Linear(d_out // 2, jepa_embed_dim)
+        )
+        self.var_jepa_pred = nn.Sequential(
+            nn.Linear(jepa_embed_dim, d_out // 2),
+            nn.ReLU(),
+            nn.Linear(d_out // 2, jepa_embed_dim)
+        )
+
     def encode(
         self,
         constraint_features: torch.Tensor,
@@ -189,6 +278,41 @@ class GNNPolicy(torch.nn.Module):
         x_all = self.var_head(v).squeeze(-1)  # (sum_n,)
         lam_all = self.lambda_act(self.cons_head(c).squeeze(-1))  # (sum_m,)  ≥ 0
         return x_all, lam_all
+
+    def jepa_embed_nodes(
+        self,
+        constraint_features: torch.Tensor,
+        edge_indices: torch.Tensor,
+        edge_features: torch.Tensor,
+        variable_features: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        JEPA embedding for GNN: encode → project → L2-normalize (per node type).
+
+        This method is used for both online and target encoders in JEPA training.
+
+        Args:
+            constraint_features: Constraint node features [num_cons, cons_nfeats]
+            edge_indices: Edge connectivity [2, num_edges]
+            edge_features: Edge features [num_edges, edge_nfeats]
+            variable_features: Variable node features [num_vars, var_nfeats]
+
+        Returns:
+            (cons_emb, var_emb): Tuple of L2-normalized embeddings
+            - cons_emb: Constraint node embeddings [num_cons, jepa_embed_dim]
+            - var_emb: Variable node embeddings [num_vars, jepa_embed_dim]
+        """
+        # Encode using standard GNN encoder
+        c, v = self.encode(constraint_features, edge_indices, edge_features, variable_features)
+
+        # Project and normalize for JEPA
+        cons_proj = self.cons_jepa_proj(c)
+        var_proj = self.var_jepa_proj(v)
+
+        cons_emb = torch.nn.functional.normalize(cons_proj, dim=-1)  # L2-normalize
+        var_emb = torch.nn.functional.normalize(var_proj, dim=-1)   # L2-normalize
+
+        return cons_emb, var_emb
 
     @staticmethod
     def _build_numeric_block(
