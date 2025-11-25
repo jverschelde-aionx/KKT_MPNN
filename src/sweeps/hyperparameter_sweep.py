@@ -26,7 +26,7 @@ from typing import Mapping
 import pandas as pd
 
 import wandb
-from train import train
+from finetune import train
 
 
 def _wandb_config_to_dict(cfg) -> dict:
@@ -94,6 +94,8 @@ def main():
             flat_overrides["lejepa_local_mask"] = model_cfg.get(
                 "lejepa_local_mask", [0.40, 0.20, 0.20]
             )
+        else:
+            flat_overrides["use_lejepa"] = False
 
     # Training configuration
     if "training" in overrides:

@@ -10,18 +10,19 @@ import numpy as np
 import torch
 import torch_geometric
 from loguru import logger
+from models.utils import get_objective_gap, get_optimal_solution, get_optimality_gap
 from torch.utils.data import DataLoader
 
 import wandb
 from data.common import ProblemClass
 from data.datasets import GraphDataset, LPDataset, make_pad_collate, pad_collate_graphs
-from models.jepa_utils import (
+from models.lejepa import (
     SigRegWrapper,
     make_gnn_lejepa_views,
     make_lp_lejepa_views,
 )
 from models.losses import kkt_loss, lejepa_loss_gnn, lejepa_loss_mlp
-from models.models import GNNPolicy, KKTNetMLP
+from models.mlp import GNNPolicy, KKTNetMLP
 
 
 class TrainingState:
@@ -458,7 +459,7 @@ def train_epoch(
     for batch in loader:
         if isinstance(batch[0], torch_geometric.data.Batch):
             # Graph path
-            batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes = batch
+            batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes, sample_paths = batch
             batch_graph = batch_graph.to(device)
             A, b, c = A.to(device), b.to(device), c.to(device)
             mask_m, mask_n = mask_m.to(device), mask_n.to(device)
@@ -477,7 +478,7 @@ def train_epoch(
             y_pred = torch.cat([x_pred, lam_pred], dim=1)
         else:
             # MLP path
-            model_input, A, b, c, mask_m, mask_n = batch
+            model_input, A, b, c, mask_m, mask_n, sample_paths = batch
             model_input = model_input.to(device)
             A, b, c = A.to(device), b.to(device), c.to(device)
             mask_m, mask_n = mask_m.to(device), mask_n.to(device)
@@ -570,13 +571,15 @@ def eval_epoch(
 
     objective_gap_sum = 0.0  # avg objective gap (relative to optimal)
     optimality_gap_sum = 0.0  # avg optimality gap (symmetric relative)
+    n_samples_with_solutions = 0  # count samples where we successfully computed gaps
+    total_samples = 0  # total number of samples processed
 
     validation_metrics: Dict[str, float] = {}
 
     for batch in loader:
         n_batches += 1
         if isinstance(batch[0], torch_geometric.data.Batch):
-            batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes = batch
+            batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes, sample_paths = batch
             batch_graph = batch_graph.to(device)
             A, b, c = A.to(device), b.to(device), c.to(device)
             mask_m, mask_n = mask_m.to(device), mask_n.to(device)
@@ -590,7 +593,7 @@ def eval_epoch(
             lam_pred = pack_by_sizes(lam_all, m_sizes, b.shape[1])
             y_pred = torch.cat([x_pred, lam_pred], dim=1)
         else:
-            model_input, A, b, c, mask_m, mask_n = batch
+            model_input, A, b, c, mask_m, mask_n, sample_paths = batch
             model_input = model_input.to(device)
             A, b, c = A.to(device), b.to(device), c.to(device)
             mask_m, mask_n = mask_m.to(device), mask_n.to(device)
@@ -612,8 +615,60 @@ def eval_epoch(
         for term_name, term_sum in terms.items():
             terms_sum[term_name] = terms_sum.get(term_name, 0.0) + term_sum.item()
 
+        # Compute optimality and objective gaps for each sample in batch
+        batch_size = c.shape[0]
+        total_samples += batch_size
+
+        for i in range(batch_size):
+            # Extract single sample - use mask to get actual size
+            mask_n_i = mask_n[i]
+            mask_m_i = mask_m[i]
+
+            # Get actual number of variables and constraints
+            n_vars = int(mask_n_i.sum().item())
+            n_constraints = int(mask_m_i.sum().item())
+
+            # Extract unpadded data
+            c_i = c[i, :n_vars]
+            b_i = b[i, :n_constraints]
+            x_i = y_pred[i, :n_vars]
+            lambda_i = y_pred[i, n_vars : n_vars + n_constraints]
+
+            # Compute optimality gap (primal-dual gap)
+            opt_gap = get_optimality_gap(x_i, lambda_i, c_i, b_i)
+            optimality_gap_sum += opt_gap
+
+            # Compute objective gap (requires optimal solution)
+            if sample_paths and sample_paths[i]:
+                try:
+                    # Get optimal solution and objective gap
+                    _, obj_gap = get_optimal_solution(
+                        bg_path=sample_paths[i],
+                        x_i=x_i,
+                        c_i=c_i,
+                    )
+                    objective_gap_sum += obj_gap
+                    n_samples_with_solutions += 1
+                except Exception as e:
+                    print(
+                        f"Could not load optimal solution for sample {sample_paths[i]}, skipping objective gap computation. Error: {e}"
+                    )
+                    # If we can't load the optimal solution, skip this sample
+                    pass
+
+    # Average the metrics
     for term_name, term_sum in terms_sum.items():
         validation_metrics[f"valid/{term_name}"] = term_sum / n_batches
+
+    # Add optimality gap (always computed)
+    if total_samples > 0:
+        validation_metrics["valid/optimality_gap"] = optimality_gap_sum / total_samples
+
+    # Add objective gap (only if we have solutions)
+    if n_samples_with_solutions > 0:
+        validation_metrics["valid/objective_gap"] = (
+            objective_gap_sum / n_samples_with_solutions
+        )
 
     return total_loss / n_batches, validation_metrics
 

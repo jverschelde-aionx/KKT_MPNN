@@ -23,7 +23,10 @@ def generate() -> None:
         description="[KKT] Generate instances",
     )
     parser.add_argument(
-        "--configs", is_config_file=True, required=False, default="config.yml"
+        "--configs",
+        is_config_file=True,
+        required=False,
+        default="configs/generate_instances.yml",
     )
 
     # Data
