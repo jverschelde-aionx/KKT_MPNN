@@ -1,3 +1,6 @@
+# data/lejepa_views.py
+from __future__ import annotations
+
 import math
 import pickle
 from dataclasses import dataclass
@@ -9,7 +12,7 @@ import torch
 import torch_geometric
 from pyscipopt import Model
 from torch.utils.data import Dataset
-from torch_geometric.data import Data
+from torch_geometric.data import Batch, Data
 
 from data.common import CONS_PAD, SCIP_INF, VARS_PAD
 
@@ -41,8 +44,8 @@ class GraphDataset(torch_geometric.data.Dataset):
             self.sample_files[index]
         )
 
-        edge_indices = A._indices()
-        edge_features = A._values().unsqueeze(1)  # real coefficients
+        edge_indices = A.edge_index
+        edge_features = A.edge_attr
 
         variable_features = torch.as_tensor(v_nodes, dtype=torch.float32)
         constraint_features = torch.as_tensor(c_nodes, dtype=torch.float32)
@@ -356,7 +359,9 @@ def pad_collate_graphs(
         mask_m[i, :m] = 1.0
         mask_n[i, :n] = 1.0
 
-    batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
+    batch_graph = torch_geometric.data.Batch.from_data_list(
+        graphs, follow_batch=["constraint_features", "variable_features"]
+    )
     return batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes, sample_paths
 
 
@@ -378,3 +383,13 @@ class PadFeaturesTransform:
         data.constraint_features = right_pad(data.constraint_features, self.cons_dim)
         data.variable_features = right_pad(data.variable_features, self.var_dim)
         return data
+
+
+def lejepa_views_collate(
+    batch: List[Data],
+    *,
+    follow_keys: Tuple[str, str] = ("constraint_features", "variable_features"),
+) -> Dict[str, object]:
+    # Just batch raw graphs. Views will be generated later on GPU via masking.
+    base = Batch.from_data_list(batch, follow_batch=list(follow_keys))
+    return {"base": base}

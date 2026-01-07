@@ -1,5 +1,5 @@
 data:
-  problems: ["CA"]
+  problems: ["RND"]
   is_sizes: [2]
   ca_sizes: [10]
   sc_sizes: [2]
@@ -8,11 +8,11 @@ data:
   data_root: ./data/instances
 
 model:
-  lejepa_lambda: 0.05 # Weight for SIGReg regularization (λ)
-  lejepa_n_global_views: 2 # Number of global views (lightly masked)
-  lejepa_n_local_views: 6 # Number of local views (heavily masked)
+  lejepa_lambda: 0.2
+  lejepa_n_global_views: 3 # Number of global views (lightly masked)
+  lejepa_n_local_views: 8 # Number of local views (heavily masked)
   sigreg_slices: 512 # Number of slices for SIGReg regularizer
-  sigreg_points: 17 # Number of points for Epps-Pulley test
+  sigreg_points: 13 # Number of points for Epps-Pulley test
 
 mlp:
   hidden: 256
@@ -26,13 +26,13 @@ gnn:
   num_emb_type: periodic
   num_emb_bins: 32
   num_emb_freqs: 16
-  lejepa_local_mask: 0.40
-  lejepa_global_mask: 0.80
-  dropout: 0.1
+  lejepa_local_mask: 0.33751201003402975
+  lejepa_global_mask: 0.8252063157958158
+  dropout: 0.2
 
 training:
   use_bipartite_graphs: true
-  optimizer: adam
+  optimizer: adamw
   weight_decay: 0.0
   scheduler: none
   warmup_pct: 0.0

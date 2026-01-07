@@ -1,0 +1,21 @@
+# Phase-3 sweep
+method: bayes
+metric:
+  name: valid/lejepa_loss
+  goal: minimize
+parameters:
+  epochs:
+    value: 100
+  early_stop_patience:
+    value: 20
+  early_stop_min_delta:
+    value: 0.10
+  lejepa_lambda: { distribution: uniform, min: 0.0247, max: 0.0352 }
+  lejepa_n_global_views: { values: [3, 2] }
+  lejepa_n_local_views: { values: [8] }
+  lejepa_global_mask: { distribution: uniform, min: 0.806, max: 0.830 }
+  lejepa_local_mask: { distribution: uniform, min: 0.317, max: 0.347 }
+  sigreg_slices: { values: [512] }
+  sigreg_points: { values: [13] }
+  dropout: { values: [0.0] }
+early_terminate: { type: hyperband, max_iter: 200, s: 2 }

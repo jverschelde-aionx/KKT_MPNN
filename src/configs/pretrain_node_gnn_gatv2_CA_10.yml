@@ -3,16 +3,16 @@ data:
   is_sizes: [2]
   ca_sizes: [10]
   sc_sizes: [2]
-  cfl_sizes: [5]
+  cfl_sizes: [10]
   rnd_sizes: [10]
   data_root: ./data/instances
 
 model:
-  lejepa_lambda: 0.05 # Weight for SIGReg regularization (λ)
+  lejepa_lambda: 0.25
   lejepa_n_global_views: 2 # Number of global views (lightly masked)
-  lejepa_n_local_views: 6 # Number of local views (heavily masked)
-  sigreg_slices: 512 # Number of slices for SIGReg regularizer
-  sigreg_points: 17 # Number of points for Epps-Pulley test
+  lejepa_n_local_views: 8 # Number of local views (heavily masked)
+  sigreg_slices: 256 # Number of slices for SIGReg regularizer
+  sigreg_points: 13 # Number of points for Epps-Pulley test
 
 mlp:
   hidden: 256
@@ -26,22 +26,28 @@ gnn:
   num_emb_type: periodic
   num_emb_bins: 32
   num_emb_freqs: 16
-  lejepa_local_mask: 0.40
-  lejepa_global_mask: 0.80
-  dropout: 0.1
+  lejepa_local_mask: 0.6
+  lejepa_global_mask: 0.1
+  lejepa_global_edge_mask: 0.05
+  lejepa_local_edge_mask: 0.20
+  bipartite_conv: gatv2
+  attn_heads: 4
+  dropout: 0.05
 
 training:
   use_bipartite_graphs: true
   optimizer: adam
   weight_decay: 0.0
-  scheduler: none
-  warmup_pct: 0.0
-  min_lr_ratio: 0.0
+  scheduler: cosine_warmup
+  warmup_pct: 0.05
+  min_lr_ratio: 0.1
   devices: "0"
   batch_size: 256
-  epochs: 400
+  epochs: 1000
   lr: 0.001
   seed: 42
   log_every: 10
-  wandb_project: kkt_gnn_pretraining
+  wandb_project: kkt_gnn_node_pretraining
   experiments_dir: ./experiments
+  lejepa_lambda_start: 0.05
+  lejepa_lambda_warm_epochs: 40

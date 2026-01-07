@@ -1,33 +1,13 @@
 data:
-  # Problem types to generate/train on
-  problems: ["CA"] # Combinatorial Auction problems
-  is_sizes: [2] # Independent Set sizes
-  ca_sizes: [50] # CA problem sizes (5 items)
-  sc_sizes: [2] # Set Cover sizes
-  cfl_sizes: [5] # Capacitated Facility Location sizes
-  rnd_sizes: [2, 5, 10] # Random LP sizes
-  # Data splits
-  test_split: 0.15 # 15% for test set
-  val_split: 0.15 # 15% for validation set
-  # Dataset size
-  n_instances: 40000 # Total instances to generate
-  # Paths
-  data_root: ./data/instances # Root directory for generated instances
-  # Solver settings
-  solve: true # Solve instances with Gurobi to get optimal solutions
-  add_pos_feat: true # Add positional features to variable features
-  norm_pos_feat: true # Normalize positional features
-  normalize_features: true # Apply min-max normalization to problem features
-  gurobi_threads: 4 # Number of threads for Gurobi solver
-  # System
-  n_jobs: 32 # Parallel jobs for data generation
-
-# GNN architecture settings (only used if use_bipartite_graphs is true)
-gnn_policy:
-  embedding_size: 128 # Dimension of node embeddings
-  cons_nfeats: 4 # Number of constraint node features
-  edge_nfeats: 1 # Number of edge features
-  var_nfeats: 18 # Number of variable node features
-  num_emb_type: periodic # Numeric embedding type: "periodic", "pwl", or "linear"
-  num_emb_bins: 32 # Bins for piecewise-linear embeddings
-  num_emb_freqs: 16 # Frequencies for periodic embeddings
+  problems: ["CA", "IS", "SC", "CFL"]
+  is_sizes: [10, 50, 100, 200]
+  ca_sizes: [100, 200]
+  sc_sizes: [10, 50, 100, 200]
+  cfl_sizes: [10, 50, 100, 200]
+  rnd_sizes: [10]
+  n_instances: 50000
+  data_root: ./data/instances
+  solve: true
+  add_pos_feat: true
+  norm_pos_feat: true
+  normalize_features: true

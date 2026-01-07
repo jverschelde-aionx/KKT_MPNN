@@ -1,0 +1,3 @@
+bg: ../data/instances/CA/BG/val/5/CA-5-0002.lp.bg
+atol: 1e-6
+rtol: 1e-6

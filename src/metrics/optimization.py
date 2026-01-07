@@ -100,6 +100,7 @@ def kkt(
     loss = (weighted_primal + weighted_dual + weighted_stat + weighted_comp).mean()
 
     return loss, {
+        "kkt_loss": loss.item(),
         "primal_feasibility": weighted_primal.mean(),
         "dual_feasibility": weighted_dual.mean(),
         "stationarity": weighted_stat.mean(),
@@ -137,7 +138,7 @@ def get_objective_gap(
 
 
 def get_optimal_solution(
-    bg_path: str,
+    input_path: str,
     x_i: torch.Tensor,
     c_i: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -145,7 +146,7 @@ def get_optimal_solution(
     x_i_cpu = x_i.detach().cpu()
     c_i_cpu = c_i.detach().cpu()
 
-    optimal_pool = load_optimal_solutions(instance_path=bg_path)
+    optimal_pool = load_optimal_solutions(instance_path=input_path)
 
     optimal_objectives = (optimal_pool.float() @ c_i_cpu).numpy()
 

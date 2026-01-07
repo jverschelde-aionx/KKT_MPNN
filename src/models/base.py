@@ -89,23 +89,28 @@ class LeJepaEncoderModule(EncoderModule, ABC):
             default=0.05,
             help="Lejepa regularization weight",
         )
+        group.add_argument(
+            "--lejepa_std_loss_weight",
+            type=float,
+            default=0.00,
+            help="Lejepa std loss weight",
+        )
 
     @staticmethod
     def name(args):
         name = f"-gv={args.lejepa_n_global_views}"
         name += f"-lv={args.lejepa_n_local_views}"
-        name += f"-sr_slice={args.sigreg_slices}"
-        name += f"-sr_point={args.sigreg_points}"
+        name += f"-slice={args.sigreg_slices}"
+        name += f"-point={args.sigreg_points}"
+        name += f"-lmbd={args.lejepa_lambda}"
+        name += f"-std={args.lejepa_std_loss_weight}"
+
         return name
 
     @abstractmethod
     def make_lejepa_views(
         self,
         input,
-        n_global_views: int,
-        n_local_views: int,
-        local_mask: List[float],
-        global_mask: List[float],
     ) -> Tuple[List[Any], List[Any]]:
         pass
 
@@ -113,33 +118,102 @@ class LeJepaEncoderModule(EncoderModule, ABC):
     def embed(self, inputs) -> torch.Tensor:
         pass
 
-    def lejepa_pred_loss(self, all_embeddings, global_embeddings):
-        centers = torch.stack(global_embeddings, 0).mean(0)  # [B, D]
-        return torch.stack([((z - centers) ** 2).mean() for z in all_embeddings]).mean()
+    def _full_mask(self, view) -> torch.Tensor:
+        cm = getattr(view, "cons_mask", None)
+        vm = getattr(view, "var_mask", None)
+        if cm is None:
+            cm = torch.zeros(
+                view.constraint_features.size(0),
+                dtype=torch.bool,
+                device=view.constraint_features.device,
+            )
+        if vm is None:
+            vm = torch.zeros(
+                view.variable_features.size(0),
+                dtype=torch.bool,
+                device=view.variable_features.device,
+            )
+        return torch.cat([cm, vm], dim=0)
+
+    def lejepa_pred_loss(self, all_embeddings, global_embeddings, all_views):
+        centers = torch.stack(global_embeddings, 0).mean(0)  # [N, D]
+
+        masked_squared_error_sum = 0.0
+        masked_count = 0
+
+        total_squared_error_sum = 0.0
+        total_count = 0
+
+        for embedding, view in zip(all_embeddings, all_views):
+            const_mask = getattr(view, "cons_mask", None)
+            variable_mask = getattr(view, "var_mask", None)
+            if const_mask is None:
+                const_mask = torch.zeros(
+                    view.constraint_features.size(0),
+                    dtype=torch.bool,
+                    device=embedding.device,
+                )
+            if variable_mask is None:
+                variable_mask = torch.zeros(
+                    view.variable_features.size(0),
+                    dtype=torch.bool,
+                    device=embedding.device,
+                )
+            full_mask = torch.cat(
+                [const_mask, variable_mask], dim=0
+            )  # [N] matches z concat order
+
+            squared_error_per_node = (embedding - centers).pow(2).mean(dim=-1)  # [N]
+
+            total_squared_error_sum += squared_error_per_node.sum()
+            total_count += squared_error_per_node.numel()
+
+            if full_mask.any():
+                masked_squared_error_sum += squared_error_per_node[full_mask].sum()
+                masked_count += int(full_mask.sum().item())
+
+        pred_loss_total = total_squared_error_sum / max(1, total_count)
+        pred_loss_masked = masked_squared_error_sum / max(1, masked_count)
+
+        return pred_loss_total, pred_loss_masked
 
     def lejepa_loss(
         self,
         input,
-        n_global_views: int,
-        n_local_views: int,
-        local_mask: List[float],
-        global_mask: List[float],
-        lambd=0.05,
+        precomputed_views: Tuple[List[Any], List[Any]],
+        lambd: float,
+        std_loss_weight=0.0,
     ):
-        global_views, all_views = self.make_lejepa_views(
-            input,
-            n_global_views,
-            n_local_views,
-            local_mask,
-            global_mask,
-        )
+        global_views, all_views = precomputed_views
 
         global_embeddings = self.embed(global_views)
         all_embeddings = self.embed(all_views)
-        pred_loss = self.lejepa_pred_loss(all_embeddings, global_embeddings)
-        sigreg_loss = torch.stack([self.sigreg(z) for z in all_embeddings]).mean()
-        loss = (1 - lambd) * pred_loss + lambd * sigreg_loss
-        return loss, pred_loss, sigreg_loss
+
+        if self.training:
+            jitter = 1e-3  # small noise for stability
+            embeddings_for_reg = [
+                embedding + jitter * torch.randn_like(embedding)
+                for embedding in all_embeddings
+            ]
+        else:
+            embeddings_for_reg = all_embeddings
+
+        # variance floor
+        z_cat = torch.cat(all_embeddings, dim=0)  # [*, D]
+        std = z_cat.std(dim=0, unbiased=False).clamp_min(1e-6)
+        std_loss = torch.nn.functional.relu(1.0 - std).mean()
+
+        pred_loss, pred_loss_masked = self.lejepa_pred_loss(
+            all_embeddings, global_embeddings, all_views
+        )
+
+        z_reg = torch.cat(embeddings_for_reg, dim=0)
+        sigreg_loss = self.sigreg(z_reg)
+
+        loss = (
+            (1 - lambd) * pred_loss + lambd * sigreg_loss + std_loss_weight * std_loss
+        )
+        return loss, pred_loss, pred_loss_masked, sigreg_loss
 
 
 def is_dist_avail_and_initialized():
@@ -410,11 +484,25 @@ class EppsPulley(UnivariateTest):
 
 
 class SigRegWrapper(torch.nn.Module):
-    def __init__(self, num_slices=1024, num_points=17):
+    def __init__(self, num_slices=1024, num_points=17, max_samples: int = 2048):
         super().__init__()
         self.loss = SlicingUnivariateTest(
             EppsPulley(n_points=num_points), num_slices=num_slices
         )
 
+        self.max_samples = (
+            None if (max_samples is None or max_samples <= 0) else int(max_samples)
+        )
+
     def forward(self, z):  # z: [N, D]
-        return self.loss(z)
+        if self.max_samples is not None and z.size(0) > self.max_samples:
+            idx = torch.randint(0, z.size(0), (self.max_samples,), device=z.device)
+            z = z[idx]
+
+        stat = self.loss(z)
+
+        # EppsPulley includes a factor ~N, normalize it out
+        N = z.size(0)
+        if is_dist_avail_and_initialized():
+            N = N * dist.get_world_size()
+        return stat / max(1, N)

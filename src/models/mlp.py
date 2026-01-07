@@ -38,7 +38,7 @@ class MLPEncoder(nn.Module):
         """Return trunk features h (used by KKT heads)."""
         return self.trunk(x)
 
-    def embed(self, x: torch.Tensor) -> torch.Tensor:
+    def embed_batch(self, x: List[torch.Tensor]) -> torch.Tensor:
         """Return LeJEPA embedding z (project(trunk(x)))."""
         h = self.trunk(x)
         return self.projector(h)
@@ -94,8 +94,8 @@ class KKTNetMLP(LeJepaEncoderModule):
     def name(args):
         name = "mlp"
         name += LeJepaEncoderModule.name(args)
-        name += f"-hidden={args.embedding_size}"
-        name += f"-embed_dim={args.cons_nfeats}"
+        name += f"-hidden={args.hidden}"
+        name += f"-embed_dim={args.embed_dim}"
         name += f"-mask={args.lejepa_local_mask}"
         return name
 
@@ -239,5 +239,5 @@ class KKTNetMLP(LeJepaEncoderModule):
         x_flat = torch.cat([A_flat, b_view, c_view], dim=1)  # [B, M*N+M+N]
         return x_flat
 
-    def embed(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.encoder.embed(inputs)
+    def embed(self, batch: List[torch.Tensor]) -> List[torch.Tensor]:
+        return self.encoder.embed_batch(batch)

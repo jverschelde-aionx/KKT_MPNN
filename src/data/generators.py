@@ -613,23 +613,14 @@ def get_bipartite_graph(
         graph_sense.append(int(sense_code))
 
     # Build paper-view tensors
-    if gi_rows:
-        edge_index = torch.tensor([gi_rows, gi_cols], dtype=torch.long)
-        edge_attr = torch.tensor(edge_attr_vals, dtype=torch.float32).unsqueeze(1)
-        # binary incidence adjacency
-        incidence = torch.sparse_coo_tensor(
-            indices=edge_index,
-            values=torch.ones(len(edge_attr_vals), dtype=torch.float32),
-            size=(m_orig, n_variables),
-        ).coalesce()
-    else:
-        edge_index = torch.zeros(2, 0, dtype=torch.long)
-        edge_attr = torch.zeros(0, 1, dtype=torch.float32)
-        incidence = torch.sparse_coo_tensor(
-            torch.zeros(2, 0, dtype=torch.long),
-            torch.zeros(0, dtype=torch.float32),
-            size=(m_orig, n_variables),
-        ).coalesce()
+    edge_index = torch.tensor([gi_rows, gi_cols], dtype=torch.long)
+    edge_attr = torch.tensor(edge_attr_vals, dtype=torch.float32).unsqueeze(1)
+    # binary incidence adjacency
+    incidence = torch.sparse_coo_tensor(
+        indices=edge_index,
+        values=torch.ones(len(edge_attr_vals), dtype=torch.float32),
+        size=(m_orig, n_variables),
+    ).coalesce()
 
     c_nodes = (
         torch.tensor(c_rows_feats, dtype=torch.float32)

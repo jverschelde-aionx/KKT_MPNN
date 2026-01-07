@@ -1,0 +1,44 @@
+# Phase-2 sweep
+method: bayes
+metric:
+  name: valid/lejepa_loss
+  goal: minimize
+parameters:
+  epochs:
+    value: 100
+  early_stop_patience:
+    value: 20
+  early_stop_min_delta:
+    value: 0.50
+  lejepa_lambda:
+    distribution: uniform
+    min: 0.02
+    max: 0.10
+
+  lejepa_n_global_views:
+    values: [2, 3]
+  lejepa_n_local_views:
+    values: [6, 8]
+
+  lejepa_global_mask:
+    distribution: uniform
+    min: 0.70
+    max: 0.91
+
+  lejepa_local_mask:
+    distribution: uniform
+    min: 0.30
+    max: 0.48
+
+  sigreg_slices:
+    values: [256, 512]
+  sigreg_points:
+    values: [9, 13]
+
+  dropout:
+    values: [0.0, 0.3]
+
+early_terminate:
+  type: hyperband
+  max_iter: 200
+  s: 2

@@ -1,0 +1,54 @@
+# sweep.yaml
+method: random
+metric:
+  goal: maximize
+  name: valid/iso/sphericity-std
+parameters:
+  epochs:
+    value: 20
+  early_stop_patience:
+    value: 1000
+  early_stop_min_delta:
+    value: 0.00
+
+  lejepa_lambda:
+    distribution: uniform
+    min: 0.01
+    max: 0.90
+
+  lejepa_n_global_views:
+    distribution: int_uniform
+    max: 5
+    min: 3
+  lejepa_n_local_views:
+    distribution: int_uniform
+    max: 16
+    min: 8
+  lejepa_global_mask:
+    values: [0.60, 0.70, 0.80, 0.90, 0.95]
+  lejepa_local_mask:
+    values: [0.30, 0.40, 0.50, 0.60]
+  optimizer:
+    distribution: categorical
+    values:
+      - adamw
+      - adam
+  sigreg_slices:
+    value: 512
+  sigreg_points:
+    value: 17
+  dropout:
+    distribution: uniform
+    max: 0.2
+    min: 0
+  lejepa_embed_dim:
+    values: [128, 256, 512]
+  embedding_size:
+    values: [64, 128, 256]
+  lejepa_std_loss_weight:
+    value: 1.0
+
+early_terminate:
+  type: hyperband
+  max_iter: 150
+  s: 2

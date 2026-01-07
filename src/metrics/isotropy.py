@@ -112,6 +112,7 @@ def isotropy_metrics(
 
     out.update(
         {
+            f"{prefix}sphericity-std": sphi * std_r,
             f"{prefix}sphericity": sphi,
             f"{prefix}kappa": kappa,
             f"{prefix}mean_abs_corr": mac,

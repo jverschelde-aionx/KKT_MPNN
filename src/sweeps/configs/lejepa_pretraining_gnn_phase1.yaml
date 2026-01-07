@@ -4,8 +4,15 @@ metric:
   name: valid/lejepa_loss
   goal: minimize
 parameters:
+  epochs:
+    value: 100
+  early_stop_patience:
+    value: 15
+  early_stop_min_delta:
+    value: 0.01
+
   lejepa_lambda:
-    distribution: log_uniform
+    distribution: uniform
     min: 0.01
     max: 0.25
 
