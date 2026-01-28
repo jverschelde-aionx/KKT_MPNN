@@ -56,7 +56,6 @@ class KKTNetMLP(LeJepaEncoderModule):
         )
         self.m = m
         self.n = n
-
         self.encoder = MLPEncoder(m, n, args.hidden, args.embed_dim)
 
         self.head_x = nn.Sequential(
@@ -78,17 +77,9 @@ class KKTNetMLP(LeJepaEncoderModule):
 
     @staticmethod
     def add_args(parser):
-        LeJepaEncoderModule.add_args(parser)
         mlp = parser.add_argument_group("mlp")
         mlp.add_argument("--hidden", type=int, default=256)
         mlp.add_argument("--embed_dim", type=int, default=128)
-        mlp.add_argument(
-            "--lejepa_local_mask",
-            type=float,
-            nargs=3,
-            default=[0.40, 0.20, 0.20],
-            help="Local view masking ratio",
-        )
 
     @staticmethod
     def name(args):

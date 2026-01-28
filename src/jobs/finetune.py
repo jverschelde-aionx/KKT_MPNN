@@ -87,9 +87,10 @@ class TrainingState:
 def build_arg_parser() -> configargparse.ArgumentParser:
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
-        default_config_files=["configs/finetune_gnn_kkt_CA_10.yml"],
+        default_config_files=[
+            "configs/finetune/finetune_ALL_50/finetune_ALL_50_gnn_frozen_encoder.yml"
+        ],
     )
-
     # Training
     t = parser.add_argument_group("training")
     t.add_argument("--devices", type=str, default="0")
@@ -114,7 +115,7 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     t.add_argument("--max_grad_norm", type=float, default=0.0)
 
     # Early stopping
-    t.add_argument("--early_stop_patience", type=int, default=20)
+    t.add_argument("--early_stop_patience", type=int, default=30)
     t.add_argument("--early_stop_min_delta", type=float, default=0.0)
 
     # Finetune mode
@@ -130,7 +131,9 @@ def build_arg_parser() -> configargparse.ArgumentParser:
         type=str,
         help="Path to encoder-only checkpoint from pretraining (e.g., .../best_encoder.pt).",
     )
-
+    t.add_argument(
+        "--save_epoch_list", type=int, nargs="+", default=[1, 2, 5, 10, 20, 30]
+    )
     t.add_argument("--primal_weight", type=float, default=0.1)
     t.add_argument("--dual_weight", type=float, default=0.1)
     t.add_argument("--stationarity_weight", type=float, default=0.6)
@@ -163,76 +166,15 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     d.add_argument(
         "--rnd_sizes", type=int, nargs="+", default=[10, 50, 100, 200, 500, 1000]
     )
+    d.add_argument("--n_instances", type=int, default=35000)
     d.add_argument("--data_root", type=str, default="../data")
-
-    # Add shared LeJepa arguments once
-    LeJepaEncoderModule.add_args(parser)
-
-    # Add both model-specific arguments (sweep can switch between models)
-    # GNN adds its own args
-    gnn = parser.add_argument_group("gnn")
-    gnn.add_argument("--embedding_size", default=64, type=int)
-    gnn.add_argument("--cons_nfeats", default=4, type=int)
-    gnn.add_argument("--edge_nfeats", default=1, type=int)
-    gnn.add_argument("--var_nfeats", default=18, type=int)
-    gnn.add_argument(
-        "--num_emb_type", choices=["periodic", "pwl", "linear"], default="periodic"
-    )
-    gnn.add_argument("--num_emb_bins", type=int, default=32)
-    gnn.add_argument("--num_emb_freqs", type=int, default=16)
-    gnn.add_argument(
-        "--lejepa_local_mask",
+    d.add_argument(
+        "--val_split",
         type=float,
-        default=0.40,
-        help="GNN local view masking ratio",
+        default=0.15,
+        help="Validation split ratio (default: 0.15 for 70/15/15 train/val/test)",
     )
-    gnn.add_argument(
-        "--lejepa_global_mask",
-        type=float,
-        default=0.1,
-        help="GNN global view masking ratio",
-    )
-    gnn.add_argument("--dropout", default=0.1, type=float)
-    gnn.add_argument("--lejepa_embed_dim", default=128, type=int)
-    gnn.add_argument(
-        "--bipartite_conv",
-        type=str,
-        choices=["gcn", "transformer", "gatv2"],
-        default="gcn",
-    )
-    gnn.add_argument("--attn_heads", type=int, default=4)
-    gnn.add_argument(
-        "--graph_pool", type=str, choices=["mean", "meanmax"], default="mean"
-    )
-
-    # MLP adds its own args
-    mlp = parser.add_argument_group("mlp")
-    mlp.add_argument("--hidden", type=int, default=256)
-    mlp.add_argument("--embed_dim", type=int, default=128)
-
     return parser
-
-
-def load_model_and_encoder(model: LeJepaEncoderModule, args: Namespace) -> GNNPolicy:
-    if args.encoder_path:
-        # Load encoder-only weights
-        model.load_encoder(args.encoder_path, strict=True)
-
-    if args.finetune_mode == "heads":
-        model.freeze_encoder()
-        logger.info("Encoder frozen. Training heads only.")
-    else:
-        model.unfreeze_encoder()
-        logger.info("Encoder unfrozen. Training encoder + heads.")
-
-    # Show param counts
-    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    enc = sum(p.numel() for p in model.encoder.parameters() if p.requires_grad)
-    heads = total - enc
-    logger.info(
-        f"Trainable parameters: total={total:,} | encoder={enc:,} | heads={heads:,}"
-    )
-    return model
 
 
 def train_epoch(
@@ -451,8 +393,16 @@ def eval_epoch(
 
 def finetune(overrides: Optional[Mapping] = None) -> None:
     try:
+        wandb.init(project="kkt_gnn_node_finetuning")
         parser = build_arg_parser()
         args, _ = parser.parse_known_args()
+
+        GNNPolicy.add_args(parser) if args.use_bipartite_graphs else KKTNetMLP.add_args(
+            parser
+        )
+
+        args, _ = parser.parse_known_args()
+
         if overrides is not None:
             apply_overrides(args, overrides)
 
@@ -461,7 +411,7 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
         device = device_from_args(args)
 
         # Data
-        train_loader, valid_loader, N_max, M_max = build_dataloaders(
+        train_loader, valid_loader, test_loader, N_max, M_max = build_dataloaders(
             args, for_pretraining=False
         )
         logger.info(
@@ -479,8 +429,9 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
             if args.use_bipartite_graphs
             else KKTNetMLP(args, M_max, N_max).to(device)
         )
+
         save_dir = init_logging_and_dirs(args, model)
-        model = load_model_and_encoder(model, args)
+        model.load_model_and_encoder(args, logger)
         optimizer = make_optimizer(model, args)
         scheduler = make_scheduler(optimizer, args, steps_per_epoch=len(train_loader))
 
@@ -540,13 +491,17 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
             # Encoder-only artifact (finetuned encoder)
             model.save_encoder(str(save_dir / "last_encoder.pt"))
 
+            if epoch in args.save_epoch_list:
+                print(f"Saving checkpoint for epoch {epoch}")
+                torch.save(ckpt, save_dir / f"epoch_{epoch:03d}.pt")
+
             improved = val_loss < (best_val - args.early_stop_min_delta)
+
             if improved:
                 best_val = float(val_loss)
                 best_epoch = epoch
                 epochs_no_improve = 0
                 torch.save(ckpt, save_dir / "best.pt")
-                model.save_encoder(str(save_dir / "best_encoder.pt"))
                 wandb.run.summary["best_val_kkt"] = best_val
                 wandb.run.summary["best_epoch"] = best_epoch
             else:

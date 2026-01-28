@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, List, Tuple
 
 import torch
 import torch.distributed.nn
+from configargparse import Namespace
 from torch import Tensor, nn
 from torch import distributed as dist
 from torch.distributed import ReduceOp
@@ -48,6 +50,26 @@ class EncoderModule(nn.Module, ABC):
 
 
 class LeJepaEncoderModule(EncoderModule, ABC):
+    def load_model_and_encoder(self, args: Namespace, logger: logging.Logger) -> None:
+        if args.encoder_path:
+            # Load encoder-only weights
+            self.load_encoder(args.encoder_path, strict=True)
+
+        if args.finetune_mode == "heads":
+            self.freeze_encoder()
+            logger.info("Encoder frozen. Training heads only.")
+        else:
+            self.unfreeze_encoder()
+            logger.info("Encoder unfrozen. Training encoder + heads.")
+
+        # Show param counts
+        total = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        enc = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
+        heads = total - enc
+        logger.info(
+            f"Trainable parameters: total={total:,} | encoder={enc:,} | heads={heads:,}"
+        )
+
     def __init__(self, sigreg_slices: int, sigreg_num_points: int) -> None:
         super().__init__()
         assert sigreg_slices > 0
@@ -207,8 +229,7 @@ class LeJepaEncoderModule(EncoderModule, ABC):
             all_embeddings, global_embeddings, all_views
         )
 
-        z_reg = torch.cat(embeddings_for_reg, dim=0)
-        sigreg_loss = self.sigreg(z_reg)
+        sigreg_loss = torch.stack([self.sigreg(z) for z in embeddings_for_reg]).mean()
 
         loss = (
             (1 - lambd) * pred_loss + lambd * sigreg_loss + std_loss_weight * std_loss
@@ -495,14 +516,9 @@ class SigRegWrapper(torch.nn.Module):
         )
 
     def forward(self, z):  # z: [N, D]
-        if self.max_samples is not None and z.size(0) > self.max_samples:
-            idx = torch.randint(0, z.size(0), (self.max_samples,), device=z.device)
+        N_full = z.size(0)
+        if self.max_samples is not None and N_full > self.max_samples:
+            idx = torch.randperm(N_full, device=z.device)[: self.max_samples]
             z = z[idx]
 
-        stat = self.loss(z)
-
-        # EppsPulley includes a factor ~N, normalize it out
-        N = z.size(0)
-        if is_dist_avail_and_initialized():
-            N = N * dist.get_world_size()
-        return stat / max(1, N)
+        return self.loss(z)

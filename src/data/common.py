@@ -22,7 +22,7 @@ class Settings:
     # Independent‑Set
     edge_probability: float = 0.25
     # Combinatorial‑Auction
-    ca_bid_factor: int = 5
+    ca_bid_factor: int = 2
     # Gurobi
     solve: bool = False
     gurobi_threads: int = 1

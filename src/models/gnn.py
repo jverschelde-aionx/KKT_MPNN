@@ -178,6 +178,7 @@ class GNNEncoder(nn.Module):
     ) -> torch.Tensor:
         cons_mask = getattr(batch, "cons_mask", None)
         var_mask = getattr(batch, "var_mask", None)
+        edge_mask = getattr(batch, "edge_mask", None)
 
         c, v = self.encode_nodes(
             batch.constraint_features,
@@ -186,6 +187,7 @@ class GNNEncoder(nn.Module):
             batch.variable_features,
             cons_mask=cons_mask,
             var_mask=var_mask,
+            edge_mask=edge_mask,
         )
 
         ce = self.cons_lejepa_proj(c)  # [sum_m, D]

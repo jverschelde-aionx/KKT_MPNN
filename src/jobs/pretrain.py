@@ -67,7 +67,7 @@ class TrainingState:
         return out
 
 
-def train(overrides: Optional[Mapping] = None):
+def train(overrides: Optional[Mapping] = None) -> str:
     try:
         parser = configargparse.ArgumentParser(
             allow_abbrev=False,
@@ -164,8 +164,15 @@ def train(overrides: Optional[Mapping] = None):
             default=[10, 50, 100, 200, 500, 1000],
         )
         t.add_argument("--max_grad_norm", type=float, default=1.0)
+        d.add_argument("--n_instances", type=int, default=35000)
 
         d.add_argument("--data_root", type=str, default="../data")
+        d.add_argument(
+            "--val_split",
+            type=float,
+            default=0.15,
+            help="Validation split ratio (default: 0.15 for 70/15/15 train/val/test)",
+        )
 
         args, _ = parser.parse_known_args()
 
@@ -190,7 +197,7 @@ def train(overrides: Optional[Mapping] = None):
 
         device = device_from_args(args)
 
-        train_loader, valid_loader, N_max, M_max = build_dataloaders(
+        train_loader, valid_loader, test_loader, N_max, M_max = build_dataloaders(
             args, for_pretraining=True
         )
 
@@ -318,6 +325,8 @@ def train(overrides: Optional[Mapping] = None):
         raise
     finally:
         wandb.finish()
+
+    return str(save_dir)
 
 
 def train_epoch(

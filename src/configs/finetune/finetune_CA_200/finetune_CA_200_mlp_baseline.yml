@@ -1,0 +1,52 @@
+data:
+  problems: ["CA"]
+  is_sizes: [200]
+  ca_sizes: [100]
+  sc_sizes: [200]
+  cfl_sizes: [200]
+  rnd_sizes: [200]
+  n_instances: 50000
+  val_split: 0.15
+
+model:
+  lejepa_lambda: 0.256
+  lejepa_n_global_views: 2 # Number of global views (lightly masked)
+  lejepa_n_local_views: 8 # Number of local views (heavily masked)
+  sigreg_slices: 512 # Number of slices for SIGReg regularizer
+  sigreg_points: 13 # Number of points for Epps-Pulley test
+
+mlp:
+  hidden: 256
+  embed_dim: 128
+gnn:
+  embedding_size: 128
+  cons_nfeats: 4
+  edge_nfeats: 1
+  var_nfeats: 18
+  num_emb_type: periodic
+  num_emb_bins: 32
+  num_emb_freqs: 16
+  # lejepa_local_mask: 0.6
+  lejepa_global_mask: 0.05
+  lejepa_global_edge_mask: 0.6
+  lejepa_local_edge_mask: 0.05
+  bipartite_conv: gatv2
+  attn_heads: 4
+  dropout: 0.05
+
+training:
+  use_bipartite_graphs: false
+  optimizer: adam
+  weight_decay: 0.0
+  scheduler: cosine_warmup
+  warmup_pct: 0.05
+  min_lr_ratio: 0.1
+  devices: "0"
+  batch_size: 80
+  epochs: 50
+  lr: 0.001
+  seed: 42
+  log_every: 10
+  wandb_project: kkt_gnn_node_finetuning_experiments
+  experiments_dir: ./experiments
+  finetune_mode: full
