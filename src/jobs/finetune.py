@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Tuple, Union
+from typing import Dict, List, Mapping, Optional, Tuple, Union
 
 import configargparse
 import torch
@@ -16,6 +16,7 @@ from torch_geometric.loader import DataLoader as PyGDataLoader
 import wandb
 from data.common import ProblemClass
 from jobs.utils import (
+    RunningStats,
     apply_overrides,
     build_dataloaders,
     device_from_args,
@@ -23,7 +24,15 @@ from jobs.utils import (
     pack_by_sizes,
     set_all_seeds,
 )
-from metrics.optimization import get_optimal_solution, get_optimality_gap, kkt
+from metrics.optimization import (
+    get_complementary_slackness,
+    get_dual_feasibility,
+    get_optimal_solution,
+    get_optimality_gap,
+    get_primal_feasibility,
+    get_stationarity,
+    kkt,
+)
 from models.base import LeJepaEncoderModule
 from models.gnn import GNNPolicy
 from models.mlp import KKTNetMLP
@@ -88,7 +97,7 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
         default_config_files=[
-            "configs/finetune/finetune_ALL_50/finetune_ALL_50_gnn_frozen_encoder.yml"
+            "configs/finetune/finetune_ALL_200_new_alpha/finetune_ALL_200_gnn_baseline.yml"
         ],
     )
     # Training
@@ -115,7 +124,7 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     t.add_argument("--max_grad_norm", type=float, default=0.0)
 
     # Early stopping
-    t.add_argument("--early_stop_patience", type=int, default=30)
+    t.add_argument("--early_stop_patience", type=int, default=3000)
     t.add_argument("--early_stop_min_delta", type=float, default=0.0)
 
     # Finetune mode
@@ -167,7 +176,7 @@ def build_arg_parser() -> configargparse.ArgumentParser:
         "--rnd_sizes", type=int, nargs="+", default=[10, 50, 100, 200, 500, 1000]
     )
     d.add_argument("--n_instances", type=int, default=35000)
-    d.add_argument("--data_root", type=str, default="../data")
+    d.add_argument("--data_root", type=str, default="data/instances")
     d.add_argument(
         "--val_split",
         type=float,
@@ -286,20 +295,19 @@ def eval_epoch(
 ) -> Dict[str, float]:
     model.eval()
 
-    metrics_sum: Dict[str, float] = {
-        "kkt_loss": 0.0,
-        "primal_feasibility": 0.0,
-        "dual_feasibility": 0.0,
-        "stationarity": 0.0,
-        "complementary_slackness": 0.0,
-        "optimality_gap": 0.0,
-        "objective_gap": 0.0,
-    }
-
-    n_batches = 0
+    metric_keys: List[str] = [
+        "kkt_loss",
+        "primal_feasibility",
+        "dual_feasibility",
+        "stationarity",
+        "complementary_slackness",
+        "optimality_gap",
+        "objective_gap",
+    ]
+    stats: Dict[str, RunningStats] = {k: RunningStats() for k in metric_keys}
 
     for batch in loader:
-        n_batches += 1
+        # ----- unpack / forward -----
         if isinstance(batch[0], PyGBatch):
             batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes, sample_paths = batch
 
@@ -317,9 +325,9 @@ def eval_epoch(
                 batch_graph.variable_features,
             )
 
-            # Pack back to [B, *]
             n_max = c.shape[1]
             m_max = b.shape[1]
+
             x_pred = pack_by_sizes(x_all, n_sizes, n_max)  # [B, n_max]
             lam_pred = pack_by_sizes(lam_all, m_sizes, m_max)  # [B, m_max]
             y_pred = torch.cat([x_pred, lam_pred], dim=1)  # [B, n_max+m_max]
@@ -327,6 +335,7 @@ def eval_epoch(
 
         else:
             model_input, A, b, c, mask_m, mask_n, sample_paths = batch
+
             model_input = model_input.to(device, non_blocking=True)
             A = A.to(device, non_blocking=True)
             b = b.to(device, non_blocking=True)
@@ -340,55 +349,70 @@ def eval_epoch(
             n_max = c.shape[1]
             m_max = b.shape[1]
 
-        loss, kkt_metrics = kkt(
-            y_pred=y_pred,
-            A=A,
-            b=b,
-            c=c,
-            mask_m=mask_m,
-            mask_n=mask_n,
-            primal_weight=primal_weight,
-            dual_weight=dual_weight,
-            stationarity_weight=stationarity_weight,
-            complementary_slackness_weight=complementary_slackness_weight,
+        # ----- per-instance KKT metrics (shape [B]) -----
+        x_pred = y_pred[:, :n_max]  # [B, n_max]
+        lambda_pred = y_pred[:, n_max : n_max + m_max]  # [B, m_max]
+
+        primal = get_primal_feasibility(x_pred, A, b, mask_m)  # [B]
+        dual = get_dual_feasibility(lambda_pred, mask_m)  # [B]
+        stat = get_stationarity(lambda_pred, A, c, mask_n)  # [B]
+        comp = get_complementary_slackness(x_pred, lambda_pred, A, b, mask_m)  # [B]
+
+        weighted_primal = primal_weight * primal
+        weighted_dual = dual_weight * dual
+        weighted_stat = stationarity_weight * stat
+        weighted_comp = complementary_slackness_weight * comp
+
+        kkt_loss_per_instance = (
+            weighted_primal + weighted_dual + weighted_stat + weighted_comp
         )
-        for key, value in kkt_metrics.items():
-            metrics_sum[key] += float(value)
 
-        optimalitty_batch_sum: float = 0.0
-        objective_batch_sum: float = 0.0
+        stats["kkt_loss"].update_batch(kkt_loss_per_instance)
+        stats["primal_feasibility"].update_batch(weighted_primal)
+        stats["dual_feasibility"].update_batch(weighted_dual)
+        stats["stationarity"].update_batch(weighted_stat)
+        stats["complementary_slackness"].update_batch(weighted_comp)
 
+        # ----- per-instance optimality gap (vectorized) -----
+        # matches your per-instance loop version, but uses masks to ignore padding
+        mask_n_f = mask_n.float()
+        mask_m_f = mask_m.float()
+
+        primal_obj = (x_pred * c * mask_n_f).sum(dim=1)  # [B]
+        dual_obj = -(lambda_pred * b * mask_m_f).sum(dim=1)  # [B]
+        opt_gap = (2.0 * (primal_obj - dual_obj).abs()) / (
+            primal_obj.abs() + dual_obj.abs() + 1e-9
+        )  # [B]
+        stats["optimality_gap"].update_batch(opt_gap)
+
+        # ----- per-instance objective gap (needs disk lookup, so loop) -----
+        obj_gaps: List[float] = []
         for i in range(B):
-            # Actual sizes via masks
             n_vars = int(mask_n[i].sum().item())
-            n_cons = int(mask_m[i].sum().item())
 
-            # Unpadded slices
+            x_i = x_pred[i, :n_vars]
             c_i = c[i, :n_vars]
-            b_i = b[i, :n_cons]
-
-            x_i = y_pred[i, :n_vars]
-            lambda_i = y_pred[i, n_max : n_max + n_cons]
-
-            opt_gap = get_optimality_gap(x_i, lambda_i, c_i, b_i)
-            optimalitty_batch_sum += float(opt_gap)
 
             input_path = sample_paths[i]
 
             _chosen_sol, obj_gap = get_optimal_solution(
-                input_path=input_path, x_i=x_i, c_i=c_i
+                input_path=input_path,
+                x_i=x_i,
+                c_i=c_i,
             )
-            objective_batch_sum += float(obj_gap)
+            obj_gaps.append(float(obj_gap))
 
-        metrics_sum["optimality_gap"] += optimalitty_batch_sum / float(B)
-        metrics_sum["objective_gap"] += objective_batch_sum / float(B)
+        stats["objective_gap"].update_batch(torch.tensor(obj_gaps))
 
-    denom = max(1, n_batches)
-    val_metrics: Dict[str, float] = {
-        f"valid/{key}": value / denom for key, value in metrics_sum.items()
-    }
+    # ----- export mean + std across instances -----
+    out: Dict[str, float] = {}
+    for k in metric_keys:
+        out[f"valid/{k}"] = stats[k].mean
+        out[f"valid/{k}_std"] = stats[k].std(
+            unbiased=False
+        )  # population std across instances
 
-    return val_metrics
+    return out
 
 
 def finetune(overrides: Optional[Mapping] = None) -> None:
@@ -412,7 +436,7 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
 
         # Data
         train_loader, valid_loader, test_loader, N_max, M_max = build_dataloaders(
-            args, for_pretraining=False
+            args, None, None, for_pretraining=False
         )
         logger.info(
             f"train size: {len(train_loader.dataset)} | valid size: {len(valid_loader.dataset)}"

@@ -26,7 +26,7 @@ def generate() -> None:
         "--configs",
         is_config_file=True,
         required=False,
-        default="configs/generate_instances.yml",
+        default="configs/generate_instances_milp.yml",
     )
 
     # Data
@@ -85,6 +85,12 @@ def generate() -> None:
     )
     d.add_argument("--data_root", type=str, default="../../data")
     d.add_argument(
+        "--relax",
+        type=lambda x: x.lower() == "true",
+        default=True,
+        help="Relax MIP instances to LP before processing (default: True)",
+    )
+    d.add_argument(
         "--solve", action="store_true", help="Run Gurobi to collect solution pools"
     )
     d.add_argument(
@@ -127,6 +133,7 @@ def generate() -> None:
         normalize_features=args.normalize_features,
         n_instances=args.n_instances,
         data_root=Path(args.data_root),
+        relax=args.relax,
         solve=args.solve,
         gurobi_threads=args.gurobi_threads,
         n_jobs=args.n_jobs,

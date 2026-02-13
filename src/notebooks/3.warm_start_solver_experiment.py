@@ -841,7 +841,7 @@ def main() -> None:
     out_dir = Path("./results/warm_start")
     out_dir.mkdir(parents=True, exist_ok=True)
     config_file = Path(
-        "../configs/finetune/finetune_ALL_200/finetune_ALL_200_mlp_baseline.yml"
+        "../configs/finetune/finetune_CA_200/finetune_CA_200_gnn_baseline.yml"
     )
     assert config_file.exists(), "Config file should exist."
     parser = configargparse.ArgumentParser(
@@ -910,7 +910,6 @@ def main() -> None:
     set_all_seeds(args.seed)
     device = device_from_args(args)
     logger.info(f"Device: {device}")
-
     # Data loaders
     train_loader, valid_loader, test_loader, N_max, M_max = build_dataloaders(
         args, None, None, for_pretraining=False
@@ -935,9 +934,10 @@ def main() -> None:
     encoder_path = model_dir / f"epoch_{50:03d}.pt"
 
     args.encoder_path = str(encoder_path)
+    args.encoder_path = "/home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/kkt_gnn_node_finetuning_experiments/run_gnn_policy-gv=2-lv=8-slice=512-point=13-lmbd=0.256-std=0.0-dim=128-l_mask=0.6-g_mask=0.05-l_e_mask=0.05-g_e_mask=0.6-dp=0.05-l_dim=128-conv=gatv2-heads=4_20260131_120842/best.pt"
     assert encoder_path.exists(), "Encoder path should exist for this experiment"
 
-    pkg = torch.load(encoder_path, map_location="cpu")
+    pkg = torch.load(args.encoder_path, map_location="cpu")
     if isinstance(pkg, dict):
         if "model" in pkg:
             model.load_state_dict(pkg["model"], strict=True)

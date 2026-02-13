@@ -126,39 +126,48 @@ def _constraint_sense_code(problem, constraint) -> Tuple[int, float]:
     return 1, lhs  # >=
 
 
-def relax_to_lp_and_minimize_inplace(lp_path: Path) -> None:
+def relax_problem(lp_path: Path) -> None:
     """
-    Ensure the on-disk model is a *linear minimization* problem.
+    Relax the on-disk model to a linear program.
 
-    Steps:
-    - Read original model (.lp may contain MIP/SOS/indicator).
-    - Build LP relaxation with m.relax() (removes integrality & SOS/indicator constraints).
-    - If it was a maximization, negate objective and switch to minimization.
-    - Overwrite the same .lp file with the relaxed/minimized model.
+    Reads the original model (.lp may contain MIP/SOS/indicator) and builds
+    the LP relaxation with m.relax(), which removes integrality, SOS, and
+    indicator constraints.  Overwrites the file in place.
     """
     m = gp.read(str(lp_path))
     mr = None
     try:
-        # LP relaxation removes integrality/SOS/indicator automatically
         mr = m.relax()
         mr.update()
-
-        # normalize objective direction to MIN
-        if mr.ModelSense == -1:  # -1 = maximize
-            for v in mr.getVars():
-                v.Obj = -v.Obj
-            mr.ModelSense = 1  # +1 = minimize
-            mr.update()
-
-        # overwrite original path with the relaxed model
         mr.write(str(lp_path))
-        logger.info(f"[relaxed->LP & MIN] Rewrote {lp_path.name}")
+        logger.info(f"[relaxed->LP] Rewrote {lp_path.name}")
     finally:
         try:
             if mr is not None:
                 mr.dispose()
         except Exception:
             pass
+        m.dispose()
+
+
+def convert_to_minimize_problem(lp_path: Path) -> None:
+    """
+    Convert the on-disk model to a minimization problem.
+
+    If the model is a maximization problem, negates every objective
+    coefficient and switches the sense to minimization.  Overwrites the
+    file in place.
+    """
+    m = gp.read(str(lp_path))
+    try:
+        if m.ModelSense == -1:  # -1 = maximize
+            for v in m.getVars():
+                v.Obj = -v.Obj
+            m.ModelSense = 1  # +1 = minimize
+            m.update()
+            m.write(str(lp_path))
+            logger.info(f"[->MIN] Rewrote {lp_path.name}")
+    finally:
         m.dispose()
 
 
@@ -186,7 +195,9 @@ def generate_IS_instances(
                 graph_type="barabasi_albert",
             )
             next(gen).write_problem(str(lp_path))
-            relax_to_lp_and_minimize_inplace(lp_path)
+            if settings.relax:
+                relax_problem(lp_path)
+            convert_to_minimize_problem(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -212,7 +223,9 @@ def generate_CA_instances(
             )
 
             next(gen).write_problem(str(lp_path))
-            relax_to_lp_and_minimize_inplace(lp_path)
+            if settings.relax:
+                relax_problem(lp_path)
+            convert_to_minimize_problem(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -242,7 +255,9 @@ def generate_SC_instances(
             )
 
             next(gen).write_problem(str(lp_path))
-            relax_to_lp_and_minimize_inplace(lp_path)
+            if settings.relax:
+                relax_problem(lp_path)
+            convert_to_minimize_problem(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -280,7 +295,9 @@ def generate_CFL_instances(
             )
 
             next(gen).write_problem(str(lp_path))
-            relax_to_lp_and_minimize_inplace(lp_path)
+            if settings.relax:
+                relax_problem(lp_path)
+            convert_to_minimize_problem(lp_path)
             lp_paths.append(lp_path)
 
 
@@ -337,7 +354,9 @@ def generate_random_instances(
                     if optimal_count % 100 == 0:
                         logger.info(f"Generated {optimal_count} optimal instances")
 
-                    relax_to_lp_and_minimize_inplace(lp_path)
+                    if settings.relax:
+                        relax_problem(lp_path)
+                    convert_to_minimize_problem(lp_path)
                     lp_paths.append(lp_path)
                     logger.info(f"Generated optimal instance: {lp_path.name}")
 

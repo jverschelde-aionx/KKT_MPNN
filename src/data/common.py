@@ -24,6 +24,7 @@ class Settings:
     # Combinatorial‑Auction
     ca_bid_factor: int = 2
     # Gurobi
+    relax: bool = True
     solve: bool = False
     gurobi_threads: int = 1
     gurobi_max_time: int = 3600

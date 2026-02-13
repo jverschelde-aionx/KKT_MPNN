@@ -1,3 +1,4 @@
+import math
 import os
 import random
 from datetime import datetime
@@ -22,6 +23,62 @@ from data.datasets import (
     pad_collate_graphs,
 )
 from models.base import LeJepaEncoderModule
+
+
+class RunningStats:
+    """
+    Online mean/std over individual samples using mergeable batch stats (Welford/Chan).
+
+    Stores:
+      n   = number of samples seen
+      mean
+      m2  = sum of squared deviations from mean (population form)
+    """
+
+    n: int = 0
+    mean: float = 0.0
+    m2: float = 0.0
+
+    def update_batch(self, x: torch.Tensor) -> None:
+        """
+        Update stats with a 1D tensor of per-instance values (length B).
+
+        Non-finite values (NaN/inf) are ignored.
+        """
+        if x is None:
+            return
+
+        x = x.detach()
+        if x.numel() == 0:
+            return
+
+        x = x[torch.isfinite(x)]
+        nb = int(x.numel())
+        if nb == 0:
+            return
+
+        mean_b = float(x.mean().item())
+        m2_b = float(((x - mean_b) ** 2).sum().item())  # sum of squared deviations
+
+        if self.n == 0:
+            self.n = nb
+            self.mean = mean_b
+            self.m2 = m2_b
+            return
+
+        # Merge two groups: (n, mean, m2) with (nb, mean_b, m2_b)
+        delta = mean_b - self.mean
+        n_total = self.n + nb
+
+        self.mean = self.mean + delta * (nb / n_total)
+        self.m2 = self.m2 + m2_b + (delta * delta) * (self.n * nb / n_total)
+        self.n = n_total
+
+    def std(self, unbiased: bool = False) -> float:
+        if self.n < 2:
+            return 0.0
+        denom = (self.n - 1) if unbiased else self.n
+        return math.sqrt(self.m2 / denom)
 
 
 def compute_lambda(
