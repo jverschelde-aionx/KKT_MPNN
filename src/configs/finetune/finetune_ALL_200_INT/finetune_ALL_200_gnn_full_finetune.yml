@@ -5,7 +5,7 @@ data:
   sc_sizes: [200]
   cfl_sizes: [200]
   rnd_sizes: [200]
-  n_instances: 4000
+  n_instances: 50000
   val_split: 0.15
 
 model:
@@ -18,6 +18,7 @@ model:
 mlp:
   hidden: 256
   embed_dim: 128
+  lejepa_local_mask: [0.40, 0.20, 0.20] # Local views masking ratios
 gnn:
   embedding_size: 128
   cons_nfeats: 4
@@ -26,7 +27,7 @@ gnn:
   num_emb_type: periodic
   num_emb_bins: 32
   num_emb_freqs: 16
-  # lejepa_local_mask: 0.6
+  lejepa_local_mask: 0.6
   lejepa_global_mask: 0.05
   lejepa_global_edge_mask: 0.6
   lejepa_local_edge_mask: 0.05
@@ -35,7 +36,7 @@ gnn:
   dropout: 0.05
 
 training:
-  use_bipartite_graphs: false
+  use_bipartite_graphs: true
   optimizer: adam
   weight_decay: 0.0
   scheduler: cosine_warmup
@@ -43,14 +44,16 @@ training:
   min_lr_ratio: 0.1
   devices: "0"
   batch_size: 80
-  epochs: 200
+  epochs: 50
   lr: 0.001
   seed: 42
   log_every: 10
   wandb_project: kkt_gnn_node_finetuning_experiments
   experiments_dir: ./experiments
+  encoder_path: /home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/kkt_gnn_node_pretraining_experiments/run_gnn_policy-gv=2-lv=8-slice=512-point=13-lmbd=0.256-std=0.0-dim=128-l_mask=0.6-g_mask=0.05-l_e_mask=0.05-g_e_mask=0.6-dp=0.05-l_dim=128-conv=gatv2-heads=4_20260115_175620/best_encoder.pt
   finetune_mode: full
-  primal_weight: 10
-  dual_weight: 10
-  complementary_slackness_weight: 10
-  stationarity_weight: 1
+  use_surrogate: true
+  surrogate_alpha: 10.0
+  surrogate_delta: 1.0
+  surrogate_beta_final: 0.1
+  surrogate_warmup_frac: 0.3

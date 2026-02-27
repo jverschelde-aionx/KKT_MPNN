@@ -108,6 +108,125 @@ def kkt(
     }
 
 
+def surrogate_loss(
+    x_pred: torch.Tensor,       # [B, n]
+    A: torch.Tensor,            # [B, m, n]
+    b: torch.Tensor,            # [B, m]
+    c: torch.Tensor,            # [B, n]
+    mask_m: torch.Tensor,       # [B, m]
+    mask_n: torch.Tensor,       # [B, n]
+    alpha: float = 10.0,
+    delta: float = 1.0,
+    beta: float = 0.0,
+    maximize: bool = False,
+    assume_prob: bool = True,
+    relative_viol: bool = True,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    # ensure float masks
+    mask_m_f = mask_m.float()
+    mask_n_f = mask_n.float()
+
+    # ensure in [0,1]
+    if not assume_prob:
+        x_pred = torch.sigmoid(x_pred)
+    else:
+        x_pred = x_pred.clamp(0.0, 1.0)
+
+    # mask variables before computing Ap
+    x_masked = x_pred * mask_n_f
+    Ap = torch.bmm(A, x_masked.unsqueeze(-1)).squeeze(-1)  # [B, m]
+
+    viol = torch.relu(Ap - b) * mask_m_f
+
+    if relative_viol:
+        den = b.abs().clamp_min(1.0) * mask_m_f + (1.0 - mask_m_f)
+        viol = viol / den
+
+    L_viol = (viol**2).sum(dim=1) / mask_m_f.sum(dim=1).clamp_min(1.0)
+
+    obj = (c * x_pred * mask_n_f).sum(dim=1) / mask_n_f.sum(dim=1).clamp_min(1.0)
+    if maximize:
+        obj = -obj
+    L_obj = obj
+
+    L_int = (x_pred * (1.0 - x_pred) * mask_n_f).sum(dim=1) / mask_n_f.sum(
+        dim=1
+    ).clamp_min(1.0)
+
+    loss = (alpha * L_viol + delta * L_obj + beta * L_int).mean()
+    return loss, {
+        "surrogate_viol": (alpha * L_viol).mean(),
+        "surrogate_obj": (delta * L_obj).mean(),
+        "surrogate_int": (beta * L_int).mean(),
+    }
+
+
+def get_surrogate_beta(
+    epoch: int, total_epochs: int, beta_final: float, warmup_frac: float = 0.3
+) -> float:
+    """
+    Ramp beta for integrality pressure.
+
+    Schedule: beta=0 for the first warmup_frac of epochs, then linearly ramp to beta_final.
+    """
+    warmup_end = int(total_epochs * warmup_frac)
+    if epoch < warmup_end:
+        return 0.0
+    ramp_epochs = total_epochs - warmup_end
+    if ramp_epochs <= 0:
+        return beta_final
+    return beta_final * min((epoch - warmup_end) / ramp_epochs, 1.0)
+
+
+def binary_feasibility_metrics(
+    x_pred: torch.Tensor,   # [B, n]
+    A: torch.Tensor,        # [B, m, n]
+    b: torch.Tensor,        # [B, m]
+    c: torch.Tensor,        # [B, n]
+    mask_m: torch.Tensor,   # [B, m]
+    mask_n: torch.Tensor,   # [B, n]
+    rho_multiplier: float = 10.0,
+) -> dict[str, torch.Tensor]:
+    """
+    Post-rounding evaluation metrics for surrogate-trained models.
+
+    Rounds x_pred to {0, 1}, then computes:
+      - feasibility_rate: fraction of instances with zero constraint violation
+      - viol_sum: per-instance sum of violations (L1)
+      - viol_max: per-instance max violation
+      - penalised_obj: c^T x_round + rho * ||max(0, A x_round - b)||_1
+        where rho = rho_multiplier * max(|c_j|) per instance
+
+    All returned tensors have shape [B].
+    """
+    mask_m_f = mask_m.float()
+    mask_n_f = mask_n.float()
+
+    # Round to binary and mask padding
+    x_round = (x_pred >= 0.5).float() * mask_n_f       # [B, n]
+
+    # Constraint violations after rounding
+    Ax = torch.bmm(A, x_round.unsqueeze(-1)).squeeze(-1)  # [B, m]
+    viol = torch.relu(Ax - b) * mask_m_f                  # [B, m]
+
+    viol_sum = viol.sum(dim=1)                             # [B]
+    viol_max = viol.max(dim=1).values                      # [B]
+    feasible = (viol_sum == 0.0).float()                   # [B]
+
+    # Penalised objective: c^T x + rho * ||viol||_1
+    obj = (c * x_round).sum(dim=1)                         # [B]
+    c_abs_max = (c.abs() * mask_n_f).max(dim=1).values     # [B]
+    rho = rho_multiplier * c_abs_max.clamp_min(1.0)        # [B]
+    penalised_obj = obj + rho * viol_sum                   # [B]
+
+    return {
+        "feasibility_rate": feasible,
+        "viol_sum": viol_sum,
+        "viol_max": viol_max,
+        "penalised_obj": penalised_obj,
+    }
+
+
 def get_dual_feasibility_violation(
     A_i: torch.Tensor, lambda_i: torch.Tensor, c_i: torch.Tensor
 ) -> Tuple[float, float]:

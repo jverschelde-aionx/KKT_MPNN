@@ -6,12 +6,12 @@ from typing import Dict, List, Mapping, Optional, Tuple, Union
 
 import configargparse
 import torch
-from configargparse import Namespace
 from loguru import logger
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch as PyGBatch
 from torch_geometric.loader import DataLoader as PyGDataLoader
+from zmq import device
 
 import wandb
 from data.common import ProblemClass
@@ -25,13 +25,16 @@ from jobs.utils import (
     set_all_seeds,
 )
 from metrics.optimization import (
+    binary_feasibility_metrics,
     get_complementary_slackness,
     get_dual_feasibility,
     get_optimal_solution,
     get_optimality_gap,
     get_primal_feasibility,
     get_stationarity,
+    get_surrogate_beta,
     kkt,
+    surrogate_loss,
 )
 from models.base import LeJepaEncoderModule
 from models.gnn import GNNPolicy
@@ -97,7 +100,7 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
         default_config_files=[
-            "configs/finetune/finetune_ALL_200_new_alpha/finetune_ALL_200_gnn_baseline.yml"
+            "configs/finetune/finetune_ALL_200_INT/finetune_ALL_200_gnn_baseline.yml"
         ],
     )
     # Training
@@ -147,6 +150,34 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     t.add_argument("--dual_weight", type=float, default=0.1)
     t.add_argument("--stationarity_weight", type=float, default=0.6)
     t.add_argument("--complementary_slackness_weight", type=float, default=0.2)
+
+    # Surrogate loss (optional addition to KKT loss)
+    t.add_argument(
+        "--use_surrogate",
+        action="store_true",
+        help="Add differentiable surrogate loss to KKT loss",
+    )
+    t.add_argument(
+        "--surrogate_alpha",
+        type=float,
+        default=10.0,
+        help="Surrogate: constraint violation weight",
+    )
+    t.add_argument(
+        "--surrogate_delta", type=float, default=1.0, help="Surrogate: objective weight"
+    )
+    t.add_argument(
+        "--surrogate_beta_final",
+        type=float,
+        default=0.1,
+        help="Surrogate: final integrality pressure (ramped from 0)",
+    )
+    t.add_argument(
+        "--surrogate_warmup_frac",
+        type=float,
+        default=0.3,
+        help="Surrogate: fraction of epochs with beta=0",
+    )
 
     # Data
     d = parser.add_argument_group("data")
@@ -198,6 +229,9 @@ def train_epoch(
     stationarity_weight: float,
     complementary_slackness_weight: float,
     max_grad_norm: float,
+    surrogate_alpha: float = 0.0,
+    surrogate_delta: float = 0.0,
+    surrogate_beta: float = 0.0,
 ) -> Tuple[float, float, float, float, float]:
     model.train()
     for batch in loader:
@@ -256,6 +290,23 @@ def train_epoch(
             complementary_slackness_weight=complementary_slackness_weight,
         )
 
+        # Surrogate loss (optional addition to KKT loss)
+        if surrogate_alpha > 0.0:
+            n = A.shape[2]
+            loss_surr, surr_metrics = surrogate_loss(
+                x_pred=y_pred[:, :n],
+                A=A,
+                b=b,
+                c=c,
+                mask_m=mask_m,
+                mask_n=mask_n,
+                alpha=surrogate_alpha,
+                delta=surrogate_delta,
+                beta=surrogate_beta,
+            )
+            loss = loss + loss_surr
+            metrics.update(surr_metrics)
+
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if max_grad_norm and max_grad_norm > 0.0:
@@ -292,8 +343,12 @@ def eval_epoch(
     dual_weight: float,
     stationarity_weight: float,
     complementary_slackness_weight: float,
+    surrogate_alpha: float = 0.0,
+    surrogate_delta: float = 0.0,
+    surrogate_beta: float = 0.0,
 ) -> Dict[str, float]:
     model.eval()
+    use_surrogate = surrogate_alpha > 0.0
 
     metric_keys: List[str] = [
         "kkt_loss",
@@ -304,6 +359,18 @@ def eval_epoch(
         "optimality_gap",
         "objective_gap",
     ]
+    if use_surrogate:
+        metric_keys.extend(
+            [
+                "surrogate_viol",
+                "surrogate_obj",
+                "surrogate_int",
+                "feasibility_rate",
+                "viol_sum",
+                "viol_max",
+                "penalised_obj",
+            ]
+        )
     stats: Dict[str, RunningStats] = {k: RunningStats() for k in metric_keys}
 
     for batch in loader:
@@ -373,6 +440,34 @@ def eval_epoch(
         stats["stationarity"].update_batch(weighted_stat)
         stats["complementary_slackness"].update_batch(weighted_comp)
 
+        # ----- surrogate metrics (if enabled) -----
+        if use_surrogate:
+            _, surr_metrics = surrogate_loss(
+                x_pred=x_pred,
+                A=A,
+                b=b,
+                c=c,
+                mask_m=mask_m,
+                mask_n=mask_n,
+                alpha=surrogate_alpha,
+                delta=surrogate_delta,
+                beta=surrogate_beta,
+            )
+            for k in ["surrogate_viol", "surrogate_obj", "surrogate_int"]:
+                stats[k].update(surr_metrics[k])
+
+            # Post-rounding metrics
+            rfm = binary_feasibility_metrics(
+                x_pred=x_pred,
+                A=A,
+                b=b,
+                c=c,
+                mask_m=mask_m,
+                mask_n=mask_n,
+            )
+            for k in ["feasibility_rate", "viol_sum", "viol_max", "penalised_obj"]:
+                stats[k].update_batch(rfm[k])
+
         # ----- per-instance optimality gap (vectorized) -----
         # matches your per-instance loop version, but uses masks to ignore padding
         mask_n_f = mask_n.float()
@@ -430,6 +525,20 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
         if overrides is not None:
             apply_overrides(args, overrides)
 
+        if args.use_surrogate:
+            if args.surrogate_alpha <= 0.0:
+                raise ValueError(
+                    f"--use_surrogate requires surrogate_alpha > 0, got {args.surrogate_alpha}"
+                )
+            if args.surrogate_delta <= 0.0:
+                raise ValueError(
+                    f"--use_surrogate requires surrogate_delta > 0, got {args.surrogate_delta}"
+                )
+            if args.surrogate_beta_final <= 0.0:
+                raise ValueError(
+                    f"--use_surrogate requires surrogate_beta_final > 0, got {args.surrogate_beta_final}"
+                )
+
         print(f"Finetuning with args: {args}")
         set_all_seeds(args.seed)
         device = device_from_args(args)
@@ -464,9 +573,23 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
         best_val: float = float("inf")
         best_epoch: int = 0
         epochs_no_improve: int = 0
-
+        print(f"device: {device}")
         # Train loop
         for epoch in range(1, args.epochs + 1):
+            # Compute surrogate beta for this epoch (0.0 if surrogate disabled)
+            surr_beta = (
+                get_surrogate_beta(
+                    epoch=state.epoch,
+                    total_epochs=args.epochs,
+                    beta_final=args.surrogate_beta_final,
+                    warmup_frac=args.surrogate_warmup_frac,
+                )
+                if args.use_surrogate
+                else 0.0
+            )
+            surr_alpha = args.surrogate_alpha if args.use_surrogate else 0.0
+            surr_delta = args.surrogate_delta if args.use_surrogate else 0.0
+
             train_kkt, train_pr, train_du, train_st, train_cp = train_epoch(
                 model=model,
                 loader=train_loader,
@@ -479,6 +602,9 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
                 stationarity_weight=args.stationarity_weight,
                 complementary_slackness_weight=args.complementary_slackness_weight,
                 max_grad_norm=float(args.max_grad_norm),
+                surrogate_alpha=surr_alpha,
+                surrogate_delta=surr_delta,
+                surrogate_beta=surr_beta,
             )
 
             val_metrics = eval_epoch(
@@ -489,6 +615,9 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
                 dual_weight=args.dual_weight,
                 stationarity_weight=args.stationarity_weight,
                 complementary_slackness_weight=args.complementary_slackness_weight,
+                surrogate_alpha=surr_alpha,
+                surrogate_delta=surr_delta,
+                surrogate_beta=args.surrogate_beta_final if args.use_surrogate else 0.0,
             )
             val_loss = val_metrics["valid/kkt_loss"]
 
