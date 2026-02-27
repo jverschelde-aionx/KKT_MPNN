@@ -1,0 +1,14 @@
+data:
+  problems: ["CA", "IS", "SC", "CFL"]
+  is_sizes: [10, 50, 100, 200]
+  ca_sizes: [5, 25, 100]
+  sc_sizes: [10, 50, 100, 200]
+  cfl_sizes: [10, 50, 100, 200]
+  rnd_sizes: [10]
+  n_instances: 50000
+  data_root: ./data/instances/milp
+  solve: true
+  relax: false
+  add_pos_feat: true
+  norm_pos_feat: true
+  normalize_features: true

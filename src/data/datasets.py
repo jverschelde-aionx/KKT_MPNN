@@ -1,5 +1,9 @@
+# data/lejepa_views.py
+from __future__ import annotations
+
 import math
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -8,6 +12,7 @@ import torch
 import torch_geometric
 from pyscipopt import Model
 from torch.utils.data import Dataset
+from torch_geometric.data import Batch, Data
 
 from data.common import CONS_PAD, SCIP_INF, VARS_PAD
 
@@ -18,8 +23,8 @@ class GraphDataset(torch_geometric.data.Dataset):
     It can be used in turn by the data loaders provided by pytorch geometric.
     """
 
-    def __init__(self, sample_files):
-        super().__init__(root=None, transform=None, pre_transform=None)
+    def __init__(self, sample_files, transform):
+        super().__init__(root=None, transform=transform, pre_transform=None)
         self.sample_files = sample_files
 
     def len(self):
@@ -39,8 +44,8 @@ class GraphDataset(torch_geometric.data.Dataset):
             self.sample_files[index]
         )
 
-        edge_indices = A._indices()
-        edge_features = A._values().unsqueeze(1)  # real coefficients
+        edge_indices = A.edge_index
+        edge_features = A.edge_attr
 
         variable_features = torch.as_tensor(v_nodes, dtype=torch.float32)
         constraint_features = torch.as_tensor(c_nodes, dtype=torch.float32)
@@ -49,8 +54,8 @@ class GraphDataset(torch_geometric.data.Dataset):
 
         graph = BipartiteNodeData(
             constraint_features=constraint_features,
-            edge_indices=torch.LongTensor(edge_indices),
-            edge_features=edge_features,
+            edge_index=torch.LongTensor(edge_indices),
+            edge_attr=edge_features,
             variable_features=variable_features,
         )
         graph.num_nodes = constraint_features.size(0) + variable_features.size(0)
@@ -73,8 +78,8 @@ class BipartiteNodeData(torch_geometric.data.Data):
     def __init__(
         self,
         constraint_features: Optional[torch.Tensor] = None,
-        edge_indices: Optional[torch.Tensor] = None,
-        edge_features: Optional[torch.Tensor] = None,
+        edge_index: Optional[torch.Tensor] = None,
+        edge_attr: Optional[torch.Tensor] = None,
         variable_features: Optional[torch.Tensor] = None,
     ):
         super().__init__()
@@ -84,8 +89,8 @@ class BipartiteNodeData(torch_geometric.data.Data):
             return
 
         self.constraint_features = constraint_features
-        self.edge_index = edge_indices
-        self.edge_attr = edge_features
+        self.edge_index = edge_index
+        self.edge_attr = edge_attr
         self.variable_features = variable_features
 
         m = constraint_features.size(0)
@@ -172,7 +177,7 @@ class LPDataset(Dataset):
         self, lp_path: Union[str, Path]
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         model = Model()
-        model.hideOutput(False)
+        model.hideOutput(True)
         model.readProblem(lp_path)
 
         variables = model.getVars()
@@ -270,6 +275,7 @@ def make_pad_collate(M_fixed: int, N_fixed: int):
         c_batch = torch.zeros((B, N_fixed), dtype=dtypec, device=device)
         mask_m = torch.zeros((B, M_fixed), dtype=torch.float32, device=device)
         mask_n = torch.zeros((B, N_fixed), dtype=torch.float32, device=device)
+        sample_paths = []
 
         for i, item in enumerate(batch):
             A_i, b_i, c_i = item["A"], item["b"], item["c"]
@@ -281,10 +287,11 @@ def make_pad_collate(M_fixed: int, N_fixed: int):
             c_batch[i, :n_i] = c_i
             mask_m[i, :m_i] = 1.0
             mask_n[i, :n_i] = 1.0
+            sample_paths.append(item.get("path", None))
 
         # flat input = [vec(A), b, c]
         flat_input = torch.cat([A_batch.view(B, -1), b_batch, c_batch], dim=1)
-        return flat_input, A_batch, b_batch, c_batch, mask_m, mask_n
+        return flat_input, A_batch, b_batch, c_batch, mask_m, mask_n, sample_paths
 
     return _pad_collate
 
@@ -305,11 +312,17 @@ def pad_collate_graphs(
     graphs: List["BipartiteNodeData"] = []
     A_sp_list, b_list, c_list = [], [], []
     m_sizes, n_sizes = [], []
+    sample_paths = []
 
-    for data in batch:
+    for i, data in enumerate(batch):
         # Encoder padding
         data.constraint_features = right_pad(data.constraint_features, CONS_PAD)
         data.variable_features = right_pad(data.variable_features, VARS_PAD)
+
+        n_c = data.constraint_features.size(0)
+        n_v = data.variable_features.size(0)
+        data.constraint_batch = torch.full((n_c,), i, dtype=torch.long)
+        data.variable_batch = torch.full((n_v,), i, dtype=torch.long)
 
         m = int(data.b_vec.numel())
         n = int(data.c_vec.numel())
@@ -327,6 +340,7 @@ def pad_collate_graphs(
         c_list.append(data.c_vec)
         m_sizes.append(m)
         n_sizes.append(n)
+        sample_paths.append(getattr(data, "sample_path", None))
 
     B = len(batch)
     max_m, max_n = max(m_sizes), max(n_sizes)
@@ -345,8 +359,10 @@ def pad_collate_graphs(
         mask_m[i, :m] = 1.0
         mask_n[i, :n] = 1.0
 
-    batch_graph = torch_geometric.data.Batch.from_data_list(graphs)
-    return batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes
+    batch_graph = torch_geometric.data.Batch.from_data_list(
+        graphs, follow_batch=["constraint_features", "variable_features"]
+    )
+    return batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes, sample_paths
 
 
 def right_pad(x: torch.Tensor, target: int) -> torch.Tensor:
@@ -356,3 +372,24 @@ def right_pad(x: torch.Tensor, target: int) -> torch.Tensor:
     pad_w = target - x.size(1)
     pad = x.new_zeros((x.size(0), pad_w))
     return torch.cat([x, pad], dim=1)
+
+
+@dataclass
+class PadFeaturesTransform:
+    cons_dim: int
+    var_dim: int
+
+    def __call__(self, data: Data) -> Data:
+        data.constraint_features = right_pad(data.constraint_features, self.cons_dim)
+        data.variable_features = right_pad(data.variable_features, self.var_dim)
+        return data
+
+
+def lejepa_views_collate(
+    batch: List[Data],
+    *,
+    follow_keys: Tuple[str, str] = ("constraint_features", "variable_features"),
+) -> Dict[str, object]:
+    # Just batch raw graphs. Views will be generated later on GPU via masking.
+    base = Batch.from_data_list(batch, follow_batch=list(follow_keys))
+    return {"base": base}

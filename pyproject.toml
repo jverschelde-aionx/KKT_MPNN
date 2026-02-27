@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kkt-mpnn"
+version = "0.1.0"
+description = "KKT MPNN - Graph Neural Network for Learning Problems"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "Joachim Verschelde", email = "joachim.verschelde@aionx.be"},
+]
+
+# Minimal core dependencies - full environment in environment.yml
+dependencies = [
+    "torch>=2.0.0",
+    "torch-geometric",
+    "numpy<2,>=1.21",
+    "wandb",
+    "pyyaml",
+    "configargparse",
+    "scikit-learn",
+    "pandas",
+    "matplotlib",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools]
+packages = ["data", "models", "scripts", "sweeps", "metrics"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.yml"]

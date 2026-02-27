@@ -22,8 +22,9 @@ class Settings:
     # Independent‑Set
     edge_probability: float = 0.25
     # Combinatorial‑Auction
-    ca_bid_factor: int = 5
+    ca_bid_factor: int = 2
     # Gurobi
+    relax: bool = True
     solve: bool = False
     gurobi_threads: int = 1
     gurobi_max_time: int = 3600

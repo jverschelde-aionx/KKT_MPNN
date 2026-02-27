@@ -1,0 +1,51 @@
+method: grid
+metric:
+  name: valid/kkt_loss
+  goal: minimize
+parameters:
+  scenario:
+    # values: ["mlp_baseline", "baseline", "pretrained_frozen", "pretrained_full"]
+    values: ["baseline", "pretrained_frozen", "pretrained_full"]
+  epochs:
+    value: 200
+  early_stop_patience:
+    value: 25
+  early_stop_min_delta:
+    value: 0.01
+
+  lejepa_lambda:
+    value: 0.126
+
+  lejepa_n_global_views:
+    value: 2
+  lejepa_n_local_views:
+    value: 8
+
+  lejepa_global_mask:
+    value: 0.95
+  lejepa_local_mask:
+    value: 0.40
+    
+
+  sigreg_slices:
+    value: 512
+  sigreg_points:
+    value: 13
+  dropout:
+    value: 0.05
+  wandb_project:
+    value: kkt_gnn_finetuning
+  bipartite_conv:
+    value: gatv2
+  attn_heads: 
+    value: 8
+  dropout: 
+    value: 0.05
+  experiments_dir:
+    value: ./experiments
+  encoder_path:
+    value: /home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/kkt_gnn_pretraining/run_20251217_221652/best_encoder.pt
+early_terminate:
+  type: hyperband
+  max_iter: 150
+  s: 2

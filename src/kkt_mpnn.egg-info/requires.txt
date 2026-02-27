@@ -1,0 +1,14 @@
+torch>=2.0.0
+torch-geometric
+numpy<2,>=1.21
+wandb
+pyyaml
+configargparse
+scikit-learn
+pandas
+matplotlib
+tqdm
+
+[dev]
+pytest
+ruff

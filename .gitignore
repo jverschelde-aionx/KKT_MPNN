@@ -8,3 +8,10 @@ src/MPNN/dataset/
 src/data/instances
 exps/
 src/outputs/
+src/experiments/
+
+# Large binary files
+*.pt
+*.npy
+*.zip
+src/runtime

@@ -1,0 +1,61 @@
+# Diagnostic Sweep: Compare Baseline vs Pretrained vs Random Frozen
+# This sweep runs Test 4 to determine if pretrained encoder provides benefit over random encoder
+
+method: grid
+metric:
+  name: valid/kkt_loss
+  goal: minimize
+
+parameters:
+  scenario:
+    values:
+      - "random_frozen" # Random encoder, freeze encoder, train heads only
+
+  epochs:
+    value: 100 # Shorter for diagnostic purposes
+
+  early_stop_patience:
+    value: 150
+  early_stop_min_delta:
+    value: 0.01
+
+  # LeJEPA params (not used during finetuning, but needed for config)
+  lejepa_lambda:
+    value: 0.126
+  lejepa_n_global_views:
+    value: 2
+  lejepa_n_local_views:
+    value: 8
+  lejepa_global_mask:
+    value: 0.95
+  lejepa_local_mask:
+    value: 0.40
+
+  # Model architecture
+  bipartite_conv:
+    value: gatv2
+  attn_heads:
+    value: 4
+  dropout:
+    value: 0.05
+
+  # Training
+  batch_size:
+    value: 8
+  lr:
+    value: 0.001
+
+  # Paths
+  wandb_project:
+    value: kkt_diagnostic_frozen_comparison
+  experiments_dir:
+    value: ./experiments
+
+  # Pretrained encoder path
+  encoder_path:
+    value: /home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/kkt_gnn_pretraining/run_20251229_154059/best_encoder.pt
+
+early_terminate:
+  type: hyperband
+  max_iter: 80
+  s: 2
