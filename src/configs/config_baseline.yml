@@ -1,0 +1,104 @@
+# ============================================================================
+# Baseline KKT Training Configuration (Mode 1)
+# ============================================================================
+# Standard KKT training without JEPA self-supervised pre-training.
+# Use this configuration as a baseline for comparison with JEPA methods.
+#
+# Usage: python train.py --config configs/config_baseline.yml
+# ============================================================================
+
+data:
+  # Problem types to generate/train on
+  problems: ["CA"]              # Combinatorial Auction problems
+  is_sizes: [2]                 # Independent Set sizes
+  ca_sizes: [5]                 # CA problem sizes (5 items)
+  sc_sizes: [2]                 # Set Cover sizes
+  cfl_sizes: [5]                # Capacitated Facility Location sizes
+  rnd_sizes: [2]                # Random LP sizes
+
+  # Data splits
+  test_split: 0.15              # 15% for test set
+  val_split: 0.15               # 15% for validation set
+  # Remaining 70% for training
+
+  # Dataset size
+  n_instances: 7000             # Total instances to generate
+
+  # Paths
+  data_root: ./data/instances   # Root directory for generated instances
+
+  # Solver settings
+  solve: true                   # Solve instances with Gurobi to get optimal solutions
+  gurobi_threads: 4             # Number of threads for Gurobi solver
+
+  # System
+  n_jobs: 32                    # Parallel jobs for data generation
+
+# GNN architecture settings (only used if use_bipartite_graphs is true)
+gnn_policy:
+  embedding_size: 128           # Dimension of node embeddings
+  cons_nfeats: 4                # Number of constraint node features
+  edge_nfeats: 1                # Number of edge features
+  var_nfeats: 18                # Number of variable node features
+  num_emb_type: periodic        # Numeric embedding type: "periodic", "pwl", or "linear"
+  num_emb_bins: 32              # Bins for piecewise-linear embeddings
+  num_emb_freqs: 16             # Frequencies for periodic embeddings
+
+# Training settings
+training:
+  # Model architecture
+  use_bipartite_graphs: false   # false = MLP, true = GNN
+
+  # Hardware
+  devices: "0"                  # GPU device IDs (comma-separated)
+
+  # Optimization
+  batch_size: 256               # Batch size for training
+  epochs: 200                   # Total training epochs
+  lr: 0.001                     # Learning rate (Adam optimizer)
+  seed: 42                      # Random seed for reproducibility
+
+  # KKT loss weights (should sum to 1.0 or close)
+  primal_weight: 0.1                        # Primal feasibility: Ax ≤ b
+  dual_weight: 0.1                          # Dual feasibility: λ ≥ 0
+  stationarity_weight: 0.6                  # Stationarity: c + A^T λ = 0
+  complementary_slackness_weight: 0.2       # Complementary slackness: λ·(Ax-b) = 0
+
+  # Logging
+  num_workers: 0                # DataLoader workers (0 = main process only)
+  log_every: 5                  # Log metrics every N batches
+
+  # =========================================================================
+  # JEPA: DISABLED for baseline
+  # =========================================================================
+  use_jepa: false               # No JEPA - standard KKT training only
+
+  # These settings are ignored when use_jepa=false, but included for reference
+  jepa_mode: "ema"
+  jepa_weight: 0.0              # No JEPA loss in baseline
+  jepa_pretrain_epochs: 0       # No pre-training
+
+  # LP-aware masking ratios (MLP) - not used in baseline
+  jepa_mask_entry_online: 0.40
+  jepa_mask_row_online: 0.20
+  jepa_mask_col_online: 0.20
+  jepa_mask_entry_target: 0.10
+  jepa_mask_row_target: 0.05
+  jepa_mask_col_target: 0.05
+
+  # GNN masking - not used in baseline
+  jepa_mask_ratio_nodes: 0.3
+
+  # Augmentations - not used in baseline
+  jepa_noisy_mask: false
+  jepa_row_scaling: false
+
+  # EMA momentum - not used in baseline
+  ema_momentum: 0.996
+
+# Testing/evaluation settings
+testing:
+  ckpt: exps/kkt_baseline/best.pt           # Path to checkpoint for evaluation
+  file_path: data/instances/CA/instance/test/5/CA-5-0001.lp  # Single instance for testing
+  out_dir: outputs                           # Output directory for test results
+  device: "0"                                # GPU device for testing
