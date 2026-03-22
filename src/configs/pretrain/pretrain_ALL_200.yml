@@ -5,7 +5,7 @@ data:
   sc_sizes: [200]
   cfl_sizes: [200]
   rnd_sizes: [200]
-  data_root: ./data/instances
+  data_root: ./data/instances/milp
   n_instances: 50000
   val_split: 0.15
 
@@ -46,10 +46,10 @@ training:
   devices: "0"
   batch_size: 80
   epochs: 400
-  lr: 0.001
+  lr: 0.0015
   seed: 42
   log_every: 10
-  wandb_project: kkt_gnn_node_pretraining_experiments
+  wandb_project: kkt_gnn_bijepa_for_milp_experiments
   experiments_dir: ./experiments
   lejepa_lambda_start: 0.90
   lejepa_lambda_warm_epochs: 100

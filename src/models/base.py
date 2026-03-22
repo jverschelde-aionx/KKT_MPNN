@@ -33,6 +33,7 @@ class EncoderModule(nn.Module, ABC):
             p.requires_grad_(False)
 
     def unfreeze_encoder(self) -> None:
+        self.encoder.train()
         for p in self.encoder.parameters():
             p.requires_grad_(True)
 
@@ -70,13 +71,11 @@ class LeJepaEncoderModule(EncoderModule, ABC):
             f"Trainable parameters: total={total:,} | encoder={enc:,} | heads={heads:,}"
         )
 
-    def __init__(self, sigreg_slices: int, sigreg_num_points: int) -> None:
+    def __init__(self, sigreg_slices: int, sigreg_points: int) -> None:
         super().__init__()
         assert sigreg_slices > 0
-        assert sigreg_num_points > 0
-        self.sigreg = SigRegWrapper(
-            num_slices=sigreg_slices, num_points=sigreg_num_points
-        )
+        assert sigreg_points > 0
+        self.sigreg = SigRegWrapper(num_slices=sigreg_slices, num_points=sigreg_points)
 
     @staticmethod
     def add_args(parser):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple, Union
@@ -39,7 +40,11 @@ from metrics.optimization import (
 from models.base import LeJepaEncoderModule
 from models.gnn import GNNPolicy
 from models.mlp import KKTNetMLP
-from models.optimizer import make_optimizer, make_scheduler
+from models.optimizer import (
+    make_optimizer,
+    make_scheduler,
+    rebuild_optimizer_for_unfreeze,
+)
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # syncs GPU ops to the line that fails
 torch.autograd.set_detect_anomaly(
@@ -100,9 +105,10 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     parser = configargparse.ArgumentParser(
         allow_abbrev=False,
         default_config_files=[
-            "configs/finetune/finetune_ALL_200_INT/finetune_ALL_200_gnn_baseline.yml"
+            "configs/finetune/milp/IS/finetune_IS_50/finetune_IS_50_gnn_baseline.yml"
         ],
     )
+    parser.add_argument("--config", is_config_file=True, help="Path to config YAML file")
     # Training
     t = parser.add_argument_group("training")
     t.add_argument("--devices", type=str, default="0")
@@ -114,7 +120,9 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     t.add_argument("--log_every", type=int, default=50)
     t.add_argument("--optimizer", type=str, choices=["adam", "adamw"], default="adam")
     t.add_argument("--weight_decay", type=float, default=0.0)
-    t.add_argument("--wandb_project", type=str, default="kkt_gnn_finetuning")
+    t.add_argument(
+        "--wandb_project", type=str, default="kkt_gnn_finetuning_for_milp_experiments"
+    )
     t.add_argument("--experiments_dir", type=str, default="./experiments")
     t.add_argument(
         "--scheduler",
@@ -142,6 +150,12 @@ def build_arg_parser() -> configargparse.ArgumentParser:
         "--encoder_path",
         type=str,
         help="Path to encoder-only checkpoint from pretraining (e.g., .../best_encoder.pt).",
+    )
+    t.add_argument(
+        "--unfreeze_epoch",
+        type=int,
+        default=0,
+        help="When finetune_mode='heads', unfreeze encoder after this many epochs. 0 = stay frozen.",
     )
     t.add_argument(
         "--save_epoch_list", type=int, nargs="+", default=[1, 2, 5, 10, 20, 30]
@@ -207,7 +221,7 @@ def build_arg_parser() -> configargparse.ArgumentParser:
         "--rnd_sizes", type=int, nargs="+", default=[10, 50, 100, 200, 500, 1000]
     )
     d.add_argument("--n_instances", type=int, default=35000)
-    d.add_argument("--data_root", type=str, default="data/instances")
+    d.add_argument("--data_root", type=str, default="data/instances/milp")
     d.add_argument(
         "--val_split",
         type=float,
@@ -247,8 +261,8 @@ def train_epoch(
                 n_sizes,
                 *rest,
             ) = batch
+            batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes, sample_paths = batch
 
-            # move to device
             batch_graph = batch_graph.to(device, non_blocking=True)
             A, b, c = A.to(device), b.to(device), c.to(device)
             mask_m, mask_n = mask_m.to(device), mask_n.to(device)
@@ -300,12 +314,17 @@ def train_epoch(
                 c=c,
                 mask_m=mask_m,
                 mask_n=mask_n,
-                alpha=surrogate_alpha,
-                delta=surrogate_delta,
-                beta=surrogate_beta,
+                violation_weight=surrogate_alpha,
+                objective_weight=surrogate_delta,
+                integrality_weight=surrogate_beta,
             )
             loss = loss + loss_surr
-            metrics.update(surr_metrics)
+            metrics["kkt_only"] = metrics["kkt_loss"]
+            metrics["surrogate_total"] = loss_surr.item()
+            metrics["surrogate_viol"] = float(surr_metrics["surrogate_viol"].mean())
+            metrics["surrogate_obj"] = float(surr_metrics["surrogate_obj"].mean())
+            metrics["surrogate_int"] = float(surr_metrics["surrogate_int"].mean())
+            metrics["binary_pressure"] = metrics["surrogate_int"]
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -318,11 +337,11 @@ def train_epoch(
         state.step(n_graphs)
         # kkt(...) returns the *weighted* components; there's no "kkt_loss" key
         state.add(
-            float(metrics["kkt_loss"]),
-            float(metrics["primal_feasibility"]),
-            float(metrics["dual_feasibility"]),
-            float(metrics["stationarity"]),
-            float(metrics["complementary_slackness"]),
+            float(metrics["kkt_loss"]) * n_graphs,
+            float(metrics["primal_feasibility"]) * n_graphs,
+            float(metrics["dual_feasibility"]) * n_graphs,
+            float(metrics["stationarity"]) * n_graphs,
+            float(metrics["complementary_slackness"]) * n_graphs,
         )
 
         if state.should_log:
@@ -356,7 +375,7 @@ def eval_epoch(
         "dual_feasibility",
         "stationarity",
         "complementary_slackness",
-        "optimality_gap",
+        "duality_gap",
         "objective_gap",
     ]
     if use_surrogate:
@@ -372,7 +391,6 @@ def eval_epoch(
             ]
         )
     stats: Dict[str, RunningStats] = {k: RunningStats() for k in metric_keys}
-
     for batch in loader:
         # ----- unpack / forward -----
         if isinstance(batch[0], PyGBatch):
@@ -440,7 +458,6 @@ def eval_epoch(
         stats["stationarity"].update_batch(weighted_stat)
         stats["complementary_slackness"].update_batch(weighted_comp)
 
-        # ----- surrogate metrics (if enabled) -----
         if use_surrogate:
             _, surr_metrics = surrogate_loss(
                 x_pred=x_pred,
@@ -449,24 +466,26 @@ def eval_epoch(
                 c=c,
                 mask_m=mask_m,
                 mask_n=mask_n,
-                alpha=surrogate_alpha,
-                delta=surrogate_delta,
-                beta=surrogate_beta,
+                violation_weight=surrogate_alpha,
+                objective_weight=surrogate_delta,
+                integrality_weight=surrogate_beta,
             )
             for k in ["surrogate_viol", "surrogate_obj", "surrogate_int"]:
-                stats[k].update(surr_metrics[k])
+                stats[k].update_batch(surr_metrics[k])
 
             # Post-rounding metrics
-            rfm = binary_feasibility_metrics(
+            metrics = binary_feasibility_metrics(
                 x_pred=x_pred,
                 A=A,
                 b=b,
                 c=c,
                 mask_m=mask_m,
                 mask_n=mask_n,
+                logits=False,  # True if x_pred are logits
             )
-            for k in ["feasibility_rate", "viol_sum", "viol_max", "penalised_obj"]:
-                stats[k].update_batch(rfm[k])
+
+            for k in metrics.keys():
+                stats[k].update_batch(metrics[k])
 
         # ----- per-instance optimality gap (vectorized) -----
         # matches your per-instance loop version, but uses masks to ignore padding
@@ -478,7 +497,7 @@ def eval_epoch(
         opt_gap = (2.0 * (primal_obj - dual_obj).abs()) / (
             primal_obj.abs() + dual_obj.abs() + 1e-9
         )  # [B]
-        stats["optimality_gap"].update_batch(opt_gap)
+        stats["duality_gap"].update_batch(opt_gap)
 
         # ----- per-instance objective gap (needs disk lookup, so loop) -----
         obj_gaps: List[float] = []
@@ -495,9 +514,11 @@ def eval_epoch(
                 x_i=x_i,
                 c_i=c_i,
             )
-            obj_gaps.append(float(obj_gap))
+            if obj_gap is not None and not math.isnan(obj_gap):
+                obj_gaps.append(float(obj_gap))
 
-        stats["objective_gap"].update_batch(torch.tensor(obj_gaps))
+        if obj_gaps:
+            stats["objective_gap"].update_batch(torch.tensor(obj_gaps))
 
     # ----- export mean + std across instances -----
     out: Dict[str, float] = {}
@@ -510,20 +531,26 @@ def eval_epoch(
     return out
 
 
-def finetune(overrides: Optional[Mapping] = None) -> None:
+def finetune(
+    overrides: Optional[Mapping] = None,
+    config_path: Optional[str] = None,
+) -> None:
     try:
-        wandb.init(project="kkt_gnn_node_finetuning")
         parser = build_arg_parser()
-        args, _ = parser.parse_known_args()
+        cli_args = ["--config", config_path] if config_path else []
+        args, _ = parser.parse_known_args(args=cli_args or None)
 
         GNNPolicy.add_args(parser) if args.use_bipartite_graphs else KKTNetMLP.add_args(
             parser
         )
 
-        args, _ = parser.parse_known_args()
+        args, _ = parser.parse_known_args(args=cli_args or None)
 
         if overrides is not None:
             apply_overrides(args, overrides)
+
+        run_name = Path(config_path).stem if config_path else None
+        wandb.init(project=args.wandb_project, name=run_name)
 
         if args.use_surrogate:
             if args.surrogate_alpha <= 0.0:
@@ -576,12 +603,36 @@ def finetune(overrides: Optional[Mapping] = None) -> None:
         print(f"device: {device}")
         # Train loop
         for epoch in range(1, args.epochs + 1):
+            # Gradual encoder unfreeze
+            if (
+                args.finetune_mode == "heads"
+                and args.unfreeze_epoch > 0
+                and epoch == args.unfreeze_epoch + 1
+            ):
+                model.unfreeze_encoder()
+                optimizer = rebuild_optimizer_for_unfreeze(model, optimizer, args)
+                scheduler = make_scheduler(
+                    optimizer, args, steps_per_epoch=len(train_loader)
+                )
+                total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                enc = sum(
+                    p.numel() for p in model.encoder.parameters() if p.requires_grad
+                )
+                logger.info(
+                    "Unfreezing encoder at epoch {}. Trainable params: total={:,} | encoder={:,} | heads={:,}",
+                    epoch,
+                    total,
+                    enc,
+                    total - enc,
+                )
+                wandb.log({"encoder_unfrozen": True, "epoch": epoch}, step=state.steps)
+
             # Compute surrogate beta for this epoch (0.0 if surrogate disabled)
             surr_beta = (
                 get_surrogate_beta(
                     epoch=state.epoch,
                     total_epochs=args.epochs,
-                    beta_final=args.surrogate_beta_final,
+                    integrality_weight_final=args.surrogate_beta_final,
                     warmup_frac=args.surrogate_warmup_frac,
                 )
                 if args.use_surrogate

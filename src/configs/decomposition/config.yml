@@ -1,0 +1,7 @@
+decomposition:
+  lp_master_path: ./data/instances/CA/instance/val/25/CA-25-6236.lp
+  max_subgraph_ratio: 0.2  # max subgraph size as fraction of total nodes (e.g. 0.2 = 20%)
+  split_strategy: metis   # one of: variables, constraints, metis
+  solve_method: gurobi    # one of: gnn, gurobi
+  checkpoint_path: ""     # path to GNNPolicy checkpoint (required for gnn method)
+  device: cpu             # cpu or cuda:N

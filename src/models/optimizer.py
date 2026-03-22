@@ -78,3 +78,17 @@ def make_optimizer(model: torch.nn.Module, args: Namespace) -> Optimizer:
         return torch.optim.AdamW(pg, lr=args.lr)
     else:
         raise ValueError(f"Unsupported optimizer: {args.optimizer}")
+
+
+def rebuild_optimizer_for_unfreeze(
+    model: torch.nn.Module, old_optimizer: Optimizer, args: Namespace
+) -> Optimizer:
+    """Rebuild optimizer after unfreezing encoder params.
+
+    AdamW's build_param_groups skips requires_grad=False params, so after
+    unfreezing those params are missing from the optimizer.  Adam tracks all
+    params from the start, so a rebuild is unnecessary.
+    """
+    if args.optimizer == "adam":
+        return old_optimizer
+    return make_optimizer(model, args)

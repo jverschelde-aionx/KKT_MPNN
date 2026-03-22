@@ -1,6 +1,6 @@
 import pickle
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -109,121 +109,140 @@ def kkt(
 
 
 def surrogate_loss(
-    x_pred: torch.Tensor,       # [B, n]
-    A: torch.Tensor,            # [B, m, n]
-    b: torch.Tensor,            # [B, m]
-    c: torch.Tensor,            # [B, n]
-    mask_m: torch.Tensor,       # [B, m]
-    mask_n: torch.Tensor,       # [B, n]
-    alpha: float = 10.0,
-    delta: float = 1.0,
-    beta: float = 0.0,
+    x_pred: torch.Tensor,  # [B, n]
+    A: torch.Tensor,  # [B, m, n]
+    b: torch.Tensor,  # [B, m]
+    c: torch.Tensor,  # [B, n]
+    mask_m: torch.Tensor,  # [B, m]
+    mask_n: torch.Tensor,  # [B, n]
+    violation_weight: float = 10.0,
+    objective_weight: float = 1.0,
+    integrality_weight: float = 0.0,
     maximize: bool = False,
     assume_prob: bool = True,
     relative_viol: bool = True,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
-    # ensure float masks
-    mask_m_f = mask_m.float()
-    mask_n_f = mask_n.float()
+    """Differentiable surrogate for binary MILP feasibility and optimality.
 
-    # ensure in [0,1]
+    Computes a weighted sum of three terms:
+      1. Constraint violation: mean squared violation of Ax <= b per instance.
+      2. Objective value: normalized LP objective c^T x.
+      3. Integrality gap: x(1-x) penalty pushing variables toward {0, 1}.
+    """
+    constraint_mask = mask_m.float()
+    variable_mask = mask_n.float()
+
     if not assume_prob:
         x_pred = torch.sigmoid(x_pred)
     else:
         x_pred = x_pred.clamp(0.0, 1.0)
 
-    # mask variables before computing Ap
-    x_masked = x_pred * mask_n_f
-    Ap = torch.bmm(A, x_masked.unsqueeze(-1)).squeeze(-1)  # [B, m]
+    x_valid = x_pred * variable_mask
+    Ax = torch.bmm(A, x_valid.unsqueeze(-1)).squeeze(-1)  # [B, m]
 
-    viol = torch.relu(Ap - b) * mask_m_f
+    constraint_violation = torch.relu(Ax - b) * constraint_mask
 
     if relative_viol:
-        den = b.abs().clamp_min(1.0) * mask_m_f + (1.0 - mask_m_f)
-        viol = viol / den
+        violation_scale = b.abs().clamp_min(1.0) * constraint_mask + (1.0 - constraint_mask)
+        constraint_violation = constraint_violation / violation_scale
 
-    L_viol = (viol**2).sum(dim=1) / mask_m_f.sum(dim=1).clamp_min(1.0)
+    loss_violation = (constraint_violation**2).sum(dim=1) / constraint_mask.sum(dim=1).clamp_min(1.0)
 
-    obj = (c * x_pred * mask_n_f).sum(dim=1) / mask_n_f.sum(dim=1).clamp_min(1.0)
+    objective_value = (c * x_pred * variable_mask).sum(dim=1) / variable_mask.sum(dim=1).clamp_min(1.0)
     if maximize:
-        obj = -obj
-    L_obj = obj
+        objective_value = -objective_value
+    loss_objective = objective_value
 
-    L_int = (x_pred * (1.0 - x_pred) * mask_n_f).sum(dim=1) / mask_n_f.sum(
+    loss_integrality = (x_pred * (1.0 - x_pred) * variable_mask).sum(dim=1) / variable_mask.sum(
         dim=1
     ).clamp_min(1.0)
 
-    loss = (alpha * L_viol + delta * L_obj + beta * L_int).mean()
+    loss = (violation_weight * loss_violation + objective_weight * loss_objective + integrality_weight * loss_integrality).mean()
     return loss, {
-        "surrogate_viol": (alpha * L_viol).mean(),
-        "surrogate_obj": (delta * L_obj).mean(),
-        "surrogate_int": (beta * L_int).mean(),
+        "surrogate_viol": violation_weight * loss_violation,      # [B]
+        "surrogate_obj": objective_weight * loss_objective,        # [B]
+        "surrogate_int": integrality_weight * loss_integrality,    # [B]
     }
 
 
 def get_surrogate_beta(
-    epoch: int, total_epochs: int, beta_final: float, warmup_frac: float = 0.3
+    epoch: int, total_epochs: int, integrality_weight_final: float, warmup_frac: float = 0.3
 ) -> float:
     """
-    Ramp beta for integrality pressure.
+    Ramp integrality weight for integrality pressure.
 
-    Schedule: beta=0 for the first warmup_frac of epochs, then linearly ramp to beta_final.
+    Schedule: weight=0 for the first warmup_frac of epochs, then linearly ramp to integrality_weight_final.
     """
     warmup_end = int(total_epochs * warmup_frac)
     if epoch < warmup_end:
         return 0.0
     ramp_epochs = total_epochs - warmup_end
     if ramp_epochs <= 0:
-        return beta_final
-    return beta_final * min((epoch - warmup_end) / ramp_epochs, 1.0)
+        return integrality_weight_final
+    return integrality_weight_final * min((epoch - warmup_end) / ramp_epochs, 1.0)
 
 
 def binary_feasibility_metrics(
-    x_pred: torch.Tensor,   # [B, n]
-    A: torch.Tensor,        # [B, m, n]
-    b: torch.Tensor,        # [B, m]
-    c: torch.Tensor,        # [B, n]
-    mask_m: torch.Tensor,   # [B, m]
-    mask_n: torch.Tensor,   # [B, n]
+    x_pred: torch.Tensor,  # [B, n] probs in [0,1] OR logits if logits=True
+    A: torch.Tensor,  # [B, m, n]
+    b: torch.Tensor,  # [B, m]
+    c: torch.Tensor,  # [B, n]
+    mask_m: torch.Tensor,  # [B, m] bool
+    mask_n: torch.Tensor,  # [B, n] bool
     rho_multiplier: float = 10.0,
-) -> dict[str, torch.Tensor]:
+    threshold: float = 0.5,
+    tol: float = 1e-9,
+    logits: bool = False,
+) -> Dict[str, torch.Tensor]:
     """
-    Post-rounding evaluation metrics for surrogate-trained models.
+    Post-rounding evaluation metrics for binary MILPs.
 
-    Rounds x_pred to {0, 1}, then computes:
-      - feasibility_rate: fraction of instances with zero constraint violation
-      - viol_sum: per-instance sum of violations (L1)
-      - viol_max: per-instance max violation
-      - penalised_obj: c^T x_round + rho * ||max(0, A x_round - b)||_1
-        where rho = rho_multiplier * max(|c_j|) per instance
+    Returns per-instance tensors of shape [B] so you can call stats[k].update_batch(...).
 
-    All returned tensors have shape [B].
+    Metrics:
+      - feasibility_rate: 0/1 per instance (mean = feasibility rate)
+      - viol_sum: L1 sum of violations per instance
+      - viol_max: max violation per instance
+      - penalised_obj: objective + rho * viol_sum (in "minimization" convention)
     """
     mask_m_f = mask_m.float()
     mask_n_f = mask_n.float()
 
-    # Round to binary and mask padding
-    x_round = (x_pred >= 0.5).float() * mask_n_f       # [B, n]
+    # Ensure probabilities
+    if logits:
+        p = torch.sigmoid(x_pred)
+    else:
+        p = x_pred.clamp(0.0, 1.0)
 
-    # Constraint violations after rounding
+    # Round to {0,1} and mask padding
+    x_round = (p >= threshold).float() * mask_n_f  # [B, n]
+
+    # Compute violations: max(0, A x - b)
     Ax = torch.bmm(A, x_round.unsqueeze(-1)).squeeze(-1)  # [B, m]
-    viol = torch.relu(Ax - b) * mask_m_f                  # [B, m]
+    viol = torch.relu(Ax - b) * mask_m_f  # [B, m]
 
-    viol_sum = viol.sum(dim=1)                             # [B]
-    viol_max = viol.max(dim=1).values                      # [B]
-    feasible = (viol_sum == 0.0).float()                   # [B]
+    viol_sum = viol.sum(dim=1)  # [B]
+    viol_max = viol.max(dim=1).values  # [B]
 
-    # Penalised objective: c^T x + rho * ||viol||_1
-    obj = (c * x_round).sum(dim=1)                         # [B]
-    c_abs_max = (c.abs() * mask_n_f).max(dim=1).values     # [B]
-    rho = rho_multiplier * c_abs_max.clamp_min(1.0)        # [B]
-    penalised_obj = obj + rho * viol_sum                   # [B]
+    # Feasible indicator (0/1 per instance)
+    feasible = (viol_max <= tol).float()  # [B]
+
+    # Objective on rounded x
+    obj = (c * x_round).sum(dim=1)  # [B]
+
+    # Put objective into "minimize" convention so penalised_obj is always "lower is better"
+
+    # Per-instance rho = rho_multiplier * max(|c_j|)
+    c_abs_max = (c.abs() * mask_n_f).max(dim=1).values  # [B]
+    rho = rho_multiplier * c_abs_max.clamp_min(1.0)  # [B]
+
+    penalised_obj = obj + rho * viol_sum  # [B]
 
     return {
-        "feasibility_rate": feasible,
-        "viol_sum": viol_sum,
-        "viol_max": viol_max,
-        "penalised_obj": penalised_obj,
+        "feasibility_rate": feasible,  # [B] (mean == feasibility rate)
+        "viol_sum": viol_sum,  # [B]
+        "viol_max": viol_max,  # [B]
+        "penalised_obj": penalised_obj,  # [B]
     }
 
 
@@ -251,21 +270,23 @@ def get_objective_gap(
     predicted_obj: float,
     optimal_obj: float,
 ) -> float:
-    """Relative suboptimality (minimization). Non-negative by definition."""
+    """Relative gap between predicted and optimal objective (minimization)."""
     denominator = max(abs(optimal_obj), 1.0)
-    return max(0.0, (predicted_obj - optimal_obj) / (denominator + 1e-9))
+    return abs(predicted_obj - optimal_obj) / (denominator + 1e-9)
 
 
 def get_optimal_solution(
     input_path: str,
     x_i: torch.Tensor,
     c_i: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[Optional[torch.Tensor], float]:
     # Move inputs to CPU for computation with loaded solutions
     x_i_cpu = x_i.detach().cpu()
     c_i_cpu = c_i.detach().cpu()
 
     optimal_pool = load_optimal_solutions(instance_path=input_path)
+    if optimal_pool is None:
+        return None, float("nan")
 
     optimal_objectives = (optimal_pool.float() @ c_i_cpu).numpy()
 

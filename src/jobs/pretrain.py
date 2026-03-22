@@ -71,7 +71,7 @@ def train(overrides: Optional[Mapping] = None) -> str:
     try:
         parser = configargparse.ArgumentParser(
             allow_abbrev=False,
-            default_config_files=["configs/pretrain_node_gnn_gatv2_CA_10.yml"],
+            default_config_files=["configs/pretrain/pretrain_ALL_10.yml"],
         )
 
         # Training
@@ -84,7 +84,9 @@ def train(overrides: Optional[Mapping] = None) -> str:
         t.add_argument("--num_workers", type=int, default=0)
         t.add_argument("--seed", type=int, default=0)
         t.add_argument("--log_every", type=int, default=50)
-        t.add_argument("--wandb_project", type=str, default="kkt_gnn_pretraining")
+        t.add_argument(
+            "--wandb_project", type=str, default="kkt_gnn_bijepa_for_milp_experiments"
+        )
         t.add_argument("--experiments_dir", type=str, default="./experiments")
 
         t.add_argument(
@@ -198,7 +200,7 @@ def train(overrides: Optional[Mapping] = None) -> str:
         device = device_from_args(args)
 
         train_loader, valid_loader, test_loader, N_max, M_max = build_dataloaders(
-            args, for_pretraining=True
+            args, None, None, for_pretraining=True
         )
 
         train_data = train_loader.dataset

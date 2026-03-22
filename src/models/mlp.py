@@ -52,7 +52,8 @@ class KKTNetMLP(LeJepaEncoderModule):
         n: int,
     ):
         super().__init__(
-            sigreg_slices=args.sigreg_slices, sigreg_num_points=args.sigreg_points
+            sigreg_slices=args.sigreg_slices,  # NO BIJEPA for MLP baseline
+            sigreg_points=args.sigreg_points,  # NO BIJEPA for MLP baseline
         )
         self.m = m
         self.n = n
@@ -77,6 +78,7 @@ class KKTNetMLP(LeJepaEncoderModule):
 
     @staticmethod
     def add_args(parser):
+        LeJepaEncoderModule.add_args(parser)
         mlp = parser.add_argument_group("mlp")
         mlp.add_argument("--hidden", type=int, default=256)
         mlp.add_argument("--embed_dim", type=int, default=128)
@@ -87,7 +89,6 @@ class KKTNetMLP(LeJepaEncoderModule):
         name += LeJepaEncoderModule.name(args)
         name += f"-hidden={args.hidden}"
         name += f"-embed_dim={args.embed_dim}"
-        name += f"-mask={args.lejepa_local_mask}"
         return name
 
     def forward(self, flat_input: torch.Tensor) -> torch.Tensor:
