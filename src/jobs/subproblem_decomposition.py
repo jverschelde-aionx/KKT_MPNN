@@ -24,9 +24,16 @@ from typing import List, Tuple
 import configargparse
 import torch
 
-from data.common import CONS_PAD, VARS_PAD
-from data.datasets import BipartiteNodeData, right_pad
+from data.datasets import BipartiteNodeData
 from data.generators import get_bipartite_graph
+from models.decomposition import (
+    build_halo_subgraphs,
+    compute_coupling_diagnostics,
+    n_splits_for,
+    split_bipartite_graph_metis,
+    split_by_constraints,
+    split_by_variables,
+)
 from models.gnn import GNNPolicy
 
 logger = logging.getLogger(__name__)
@@ -49,258 +56,6 @@ class SubproblemResult:
     lambda_pred: torch.Tensor  # [n_sub_cons]
     orig_var_ids: torch.Tensor  # mapping back to master variable indices
     orig_cons_ids: torch.Tensor  # mapping back to master constraint indices
-
-
-# ---------------------------------------------------------------------------
-# Splitting helpers (identical to master_problem_decomposition.py)
-# ---------------------------------------------------------------------------
-
-
-def _n_splits_for(n_total: int, max_size: int) -> int:
-    """Compute minimum number of partitions so each has at most max_size nodes."""
-    import math
-
-    return max(1, math.ceil(n_total / max_size))
-
-
-def _split_by_constraints(
-    c_nodes: torch.Tensor,
-    v_nodes: torch.Tensor,
-    edge_index: torch.Tensor,
-    edge_attr: torch.Tensor,
-    max_subgraph_size: int,
-) -> List[BipartiteNodeData]:
-    """Partition constraint nodes so each chunk has at most max_subgraph_size
-    constraints. Connected variables are induced and may exceed the cap."""
-    n_cons = c_nodes.size(0)
-    n_splits = _n_splits_for(n_cons, max_subgraph_size)
-    chunk_sizes = _balanced_chunks(n_cons, n_splits)
-
-    subgraphs: List[BipartiteNodeData] = []
-    offset = 0
-    for size in chunk_sizes:
-        if size == 0:
-            offset += size
-            continue
-        cons_ids = torch.arange(offset, offset + size)
-        offset += size
-        sg = _extract_subgraph_by_constraints(
-            cons_ids, c_nodes, v_nodes, edge_index, edge_attr
-        )
-        subgraphs.append(sg)
-    return subgraphs
-
-
-def _split_by_variables(
-    c_nodes: torch.Tensor,
-    v_nodes: torch.Tensor,
-    edge_index: torch.Tensor,
-    edge_attr: torch.Tensor,
-    max_subgraph_size: int,
-) -> List[BipartiteNodeData]:
-    """Partition variable nodes so each chunk has at most max_subgraph_size
-    variables. Connected constraints are induced and may exceed the cap."""
-    n_vars = v_nodes.size(0)
-    n_splits = _n_splits_for(n_vars, max_subgraph_size)
-    chunk_sizes = _balanced_chunks(n_vars, n_splits)
-
-    subgraphs: List[BipartiteNodeData] = []
-    offset = 0
-    for size in chunk_sizes:
-        if size == 0:
-            offset += size
-            continue
-        var_ids = torch.arange(offset, offset + size)
-        offset += size
-        sg = _extract_subgraph_by_variables(
-            var_ids, c_nodes, v_nodes, edge_index, edge_attr
-        )
-        subgraphs.append(sg)
-    return subgraphs
-
-
-def _split_by_metis(
-    c_nodes: torch.Tensor,
-    v_nodes: torch.Tensor,
-    edge_index: torch.Tensor,
-    edge_attr: torch.Tensor,
-    max_subgraph_size: int,
-) -> List[BipartiteNodeData]:
-    """Use METIS graph partitioning so each subgraph has at most
-    max_subgraph_size total nodes."""
-    try:
-        import pymetis
-    except ImportError:
-        raise ImportError(
-            "pymetis is required for the 'metis' split strategy. "
-            "Install it with: pip install pymetis"
-        )
-
-    n_cons = c_nodes.size(0)
-    n_vars = v_nodes.size(0)
-    n_total = n_cons + n_vars
-    n_splits = _n_splits_for(n_total, max_subgraph_size)
-
-    if n_splits <= 1:
-        return [
-            _extract_subgraph(
-                torch.arange(n_cons),
-                torch.arange(n_vars),
-                c_nodes,
-                v_nodes,
-                edge_index,
-                edge_attr,
-            )
-        ]
-
-    # Build adjacency list for pymetis (undirected bipartite graph).
-    # Nodes 0..n_cons-1 are constraints, n_cons..n_total-1 are variables.
-    adjacency: List[List[int]] = [[] for _ in range(n_total)]
-    cons_idx = edge_index[0]  # constraint indices
-    var_idx = edge_index[1]  # variable indices
-
-    for c, v in zip(cons_idx.tolist(), var_idx.tolist()):
-        v_shifted = v + n_cons
-        adjacency[c].append(v_shifted)
-        adjacency[v_shifted].append(c)
-
-    # Deduplicate adjacency lists
-    adjacency = [sorted(set(nbrs)) for nbrs in adjacency]
-
-    _, membership = pymetis.part_graph(n_splits, adjacency=adjacency)
-    membership = torch.tensor(membership, dtype=torch.long)
-
-    subgraphs: List[BipartiteNodeData] = []
-    for part in range(n_splits):
-        part_nodes = (membership == part).nonzero(as_tuple=False).view(-1)
-        cons_ids = part_nodes[part_nodes < n_cons]
-        var_ids = part_nodes[part_nodes >= n_cons] - n_cons
-
-        # If a partition has no constraint or variable nodes, include all
-        # connected ones to avoid empty subgraphs.
-        if cons_ids.numel() == 0 and var_ids.numel() > 0:
-            var_set = set(var_ids.tolist())
-            mask = torch.tensor(
-                [v.item() in var_set for v in edge_index[1]], dtype=torch.bool
-            )
-            cons_ids = edge_index[0][mask].unique()
-        elif var_ids.numel() == 0 and cons_ids.numel() > 0:
-            cons_set = set(cons_ids.tolist())
-            mask = torch.tensor(
-                [c.item() in cons_set for c in edge_index[0]], dtype=torch.bool
-            )
-            var_ids = edge_index[1][mask].unique()
-
-        if cons_ids.numel() == 0 or var_ids.numel() == 0:
-            continue
-
-        sg = _extract_subgraph(
-            cons_ids, var_ids, c_nodes, v_nodes, edge_index, edge_attr
-        )
-        subgraphs.append(sg)
-
-    return subgraphs
-
-
-# ---------------------------------------------------------------------------
-# Extraction utilities
-# ---------------------------------------------------------------------------
-
-
-def _balanced_chunks(total: int, n: int) -> List[int]:
-    """Split `total` items into `n` chunks as evenly as possible."""
-    base, remainder = divmod(total, n)
-    return [base + (1 if i < remainder else 0) for i in range(n)]
-
-
-def _extract_subgraph_by_constraints(
-    cons_ids: torch.Tensor,
-    c_nodes: torch.Tensor,
-    v_nodes: torch.Tensor,
-    edge_index: torch.Tensor,
-    edge_attr: torch.Tensor,
-) -> BipartiteNodeData:
-    """Given a set of constraint node ids, extract the induced subgraph
-    (all variables connected to those constraints)."""
-
-    cons_mask = torch.zeros(c_nodes.size(0), dtype=torch.bool)
-    cons_mask[cons_ids] = True
-    edge_mask = cons_mask[edge_index[0]]  # [E] bool
-    var_ids = edge_index[1][edge_mask].unique()
-
-    return _extract_subgraph(cons_ids, var_ids, c_nodes, v_nodes, edge_index, edge_attr)
-
-
-def _extract_subgraph_by_variables(
-    var_ids: torch.Tensor,
-    c_nodes: torch.Tensor,
-    v_nodes: torch.Tensor,
-    edge_index: torch.Tensor,
-    edge_attr: torch.Tensor,
-) -> BipartiteNodeData:
-    """Given a set of variable node ids, extract the induced subgraph
-    (all constraints connected to those variables)."""
-    var_mask = torch.zeros(v_nodes.size(0), dtype=torch.bool)
-    var_mask[var_ids] = True
-    edge_mask = var_mask[edge_index[1]]
-    cons_ids = edge_index[0][edge_mask].unique()
-    return _extract_subgraph(cons_ids, var_ids, c_nodes, v_nodes, edge_index, edge_attr)
-
-
-def _extract_subgraph(
-    cons_ids: torch.Tensor,
-    var_ids: torch.Tensor,
-    c_nodes: torch.Tensor,
-    v_nodes: torch.Tensor,
-    edge_index: torch.Tensor,
-    edge_attr: torch.Tensor,
-) -> BipartiteNodeData:
-    """Build a BipartiteNodeData from a subset of constraint and variable nodes."""
-    cons_set = set(cons_ids.tolist())
-    var_set = set(var_ids.tolist())
-
-    # Build remapping dicts
-    cons_remap = {old: new for new, old in enumerate(sorted(cons_set))}
-    var_remap = {old: new for new, old in enumerate(sorted(var_set))}
-
-    # Find edges that connect the selected constraints and variables
-    cons_mask = torch.zeros(c_nodes.size(0), dtype=torch.bool)
-    cons_mask[cons_ids] = True
-    var_mask = torch.zeros(v_nodes.size(0), dtype=torch.bool)
-    var_mask[var_ids] = True
-    edge_mask = cons_mask[edge_index[0]] & var_mask[edge_index[1]]
-    sub_edge_index = edge_index[:, edge_mask]
-    sub_edge_attr = edge_attr[edge_mask]
-
-    # Remap edge indices
-    new_cons = torch.tensor(
-        [cons_remap[c.item()] for c in sub_edge_index[0]], dtype=torch.long
-    )
-    new_vars = torch.tensor(
-        [var_remap[v.item()] for v in sub_edge_index[1]], dtype=torch.long
-    )
-    sub_edge_index = torch.stack([new_cons, new_vars], dim=0)
-
-    # Extract node features
-    sorted_cons = sorted(cons_set)
-    sorted_vars = sorted(var_set)
-    sub_c_nodes = c_nodes[sorted_cons]
-    sub_v_nodes = v_nodes[sorted_vars]
-
-    # Pad features to expected dimensions
-    sub_c_nodes = right_pad(sub_c_nodes, CONS_PAD)
-    sub_v_nodes = right_pad(sub_v_nodes, VARS_PAD)
-
-    sg = BipartiteNodeData(
-        constraint_features=sub_c_nodes,
-        edge_index=sub_edge_index,
-        edge_attr=sub_edge_attr,
-        variable_features=sub_v_nodes,
-    )
-
-    sg.orig_cons_ids = torch.tensor(sorted_cons, dtype=torch.long)
-    sg.orig_var_ids = torch.tensor(sorted_vars, dtype=torch.long)
-    return sg
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +95,11 @@ def _solve_subproblem_gurobi(
     n_sub_cons = sg.constraint_features.size(0)
 
     # Extract sub-problem data using original indices
-    b_sub = graph_b[sg.orig_cons_ids].numpy()
-    sense_sub = graph_sense[sg.orig_cons_ids].numpy()
-    c_sub = c_vec[sg.orig_var_ids].numpy()
+    orig_cons = sg.orig_cons_ids.numpy()
+    orig_vars = sg.orig_var_ids.numpy()
+    b_sub = graph_b[orig_cons].numpy() if isinstance(graph_b, torch.Tensor) else graph_b[orig_cons]
+    sense_sub = graph_sense[orig_cons].numpy() if isinstance(graph_sense, torch.Tensor) else graph_sense[orig_cons]
+    c_sub = c_vec[orig_vars].numpy() if isinstance(c_vec, torch.Tensor) else c_vec[orig_vars]
 
     # Build sparse A_sub from edge_index and edge_attr
     local_cons = sg.edge_index[0].numpy()  # local constraint indices
@@ -356,7 +113,15 @@ def _solve_subproblem_gurobi(
     model.Params.OutputFlag = 0  # suppress output
 
     # Add continuous variables (LP relaxation)
-    x_vars = model.addMVar(n_sub_vars, lb=0.0, ub=1.0, obj=c_sub, name="x")
+    x_vars = model.addVars(
+        n_sub_vars, lb=0.0, ub=1.0, name="x",
+    )
+    model.update()
+    # Set objective coefficients
+    model.setObjective(
+        gp.LinExpr(c_sub.tolist(), [x_vars[j] for j in range(n_sub_vars)]),
+        GRB.MINIMIZE,
+    )
 
     # Build constraint matrix row by row, tracking which local indices
     # were actually added so duals can be placed at the correct positions.
@@ -375,13 +140,13 @@ def _solve_subproblem_gurobi(
         for j, coeff in zip(var_indices, var_coeffs):
             expr.addTerms(float(coeff), x_vars[int(j)])
 
-        model.addConstr(expr, grb_sense, float(b_sub[i]))
+        model.addLConstr(expr, grb_sense, float(b_sub[i]))
         added_cons_indices.append(i)
 
     model.optimize()
 
     if model.Status == GRB.OPTIMAL or model.Status == GRB.SUBOPTIMAL:
-        x_sol = torch.tensor([v.X for v in x_vars.tolist()], dtype=torch.float32)
+        x_sol = torch.tensor([x_vars[j].X for j in range(n_sub_vars)], dtype=torch.float32)
         # Extract dual values and place at correct constraint positions
         constrs = model.getConstrs()
         lam_sol = torch.zeros(n_sub_cons, dtype=torch.float32)
@@ -476,6 +241,13 @@ def _parse_args() -> configargparse.Namespace:
         help="Path to GNNPolicy checkpoint (required for --solve_method gnn)",
     )
     g.add_argument(
+        "--halo_hops",
+        type=int,
+        default=0,
+        help="Number of BFS hops for halo expansion (0=none, 1, 2, 4 typical). "
+        "Only used with --split_strategy metis.",
+    )
+    g.add_argument(
         "--device",
         type=str,
         default="cpu",
@@ -503,6 +275,7 @@ def main() -> List[SubproblemResult]:
 
     split_strategy = args.split_strategy
     solve_method = args.solve_method
+    halo_hops = args.halo_hops
     checkpoint_path = args.checkpoint_path or None
     device = torch.device(args.device)
 
@@ -538,6 +311,7 @@ def main() -> List[SubproblemResult]:
         max_subgraph_size,
     )
     logger.info("split_strategy     : %s", split_strategy)
+    logger.info("halo_hops          : %d", halo_hops)
     logger.info("solve_method       : %s", solve_method)
     logger.info("checkpoint         : %s", checkpoint_path or "(none)")
     logger.info("device             : %s", device)
@@ -551,77 +325,55 @@ def main() -> List[SubproblemResult]:
 
     # --- Step 2: Split ---
     if split_strategy == "constraints":
-        subgraphs = _split_by_constraints(
+        if halo_hops > 0:
+            logger.warning("halo_hops=%d ignored for split_strategy='constraints'", halo_hops)
+        subgraphs = split_by_constraints(
             c_nodes, v_nodes, edge_index, edge_attr, max_subgraph_size
         )
     elif split_strategy == "variables":
-        subgraphs = _split_by_variables(
+        if halo_hops > 0:
+            logger.warning("halo_hops=%d ignored for split_strategy='variables'", halo_hops)
+        subgraphs = split_by_variables(
             c_nodes, v_nodes, edge_index, edge_attr, max_subgraph_size
         )
     else:  # metis
-        subgraphs = _split_by_metis(
-            c_nodes, v_nodes, edge_index, edge_attr, max_subgraph_size
+        num_parts = n_splits_for(n_cons + n_vars, max_subgraph_size)
+        specs = split_bipartite_graph_metis(
+            c_nodes, v_nodes, edge_index, edge_attr, num_parts=num_parts
+        )
+        subgraphs = build_halo_subgraphs(
+            specs, c_nodes, v_nodes, edge_index, edge_attr, halo_hops=halo_hops,
         )
 
     logger.info("Created %d subgraphs:", len(subgraphs))
     for i, sg in enumerate(subgraphs):
+        n_c = sg.constraint_features.size(0)
+        n_v = sg.variable_features.size(0)
+        halo_info = ""
+        if hasattr(sg, "owned_cons_mask"):
+            owned_c = int(sg.owned_cons_mask.sum().item())
+            owned_v = int(sg.owned_var_mask.sum().item())
+            halo_info = f" (owned: {owned_c}c+{owned_v}v, halo: {n_c - owned_c}c+{n_v - owned_v}v)"
         logger.info(
-            "  subgraph %d — %d constraints, %d variables, %d edges",
-            i,
-            sg.constraint_features.size(0),
-            sg.variable_features.size(0),
-            sg.edge_index.size(1),
+            "  subgraph %d — %d constraints, %d variables, %d edges%s",
+            i, n_c, n_v, sg.edge_index.size(1), halo_info,
         )
 
     # --- Coupling diagnostics ---
-    var_to_block = -torch.ones(n_vars, dtype=torch.long)
-    for k, sg in enumerate(subgraphs):
-        var_to_block[sg.orig_var_ids] = k
-
-    # For each edge, look up which block its variable belongs to
-    edge_blocks = var_to_block[edge_index[1]]  # [E]
-
-    # For each constraint, find the set of blocks its variables belong to
-    n_blocks = len(subgraphs)
-    cons_block_pair = torch.stack([edge_index[0], edge_blocks], dim=0)  # [2, E]
-    assigned_mask = edge_blocks >= 0
-    cons_block_pair = cons_block_pair[:, assigned_mask]
-    unique_pairs = cons_block_pair.T.unique(dim=0)  # [P, 2]
-    cons_ids_in_pairs, blocks_per_cons_counts = unique_pairs[:, 0].unique(
-        return_counts=True
-    )
-    blocks_per_constraint = torch.zeros(n_cons, dtype=torch.long)
-    blocks_per_constraint[cons_ids_in_pairs] = blocks_per_cons_counts
-
-    coupling_mask = blocks_per_constraint > 1
-    n_coupling = coupling_mask.sum().item()
-    frac_coupling = n_coupling / max(n_cons, 1)
-    avg_blocks = blocks_per_constraint.float().mean().item()
-
-    # Edge cut: edges whose constraint and variable belong to different blocks
-    cons_to_block = -torch.ones(n_cons, dtype=torch.long)
-    for k, sg in enumerate(subgraphs):
-        cons_to_block[sg.orig_cons_ids] = k
-    edge_cons_block = cons_to_block[edge_index[0]]
-    edge_var_block = var_to_block[edge_index[1]]
-    both_assigned = (edge_cons_block >= 0) & (edge_var_block >= 0)
-    edge_cut_count = int(
-        ((edge_cons_block != edge_var_block) & both_assigned).sum().item()
-    )
-
+    diag = compute_coupling_diagnostics(subgraphs, n_cons, n_vars, edge_index)
     logger.info("--- Coupling diagnostics ---")
     logger.info(
         "  coupling constraints  : %d / %d (%.1f%%)",
-        n_coupling,
-        n_cons,
-        frac_coupling * 100,
+        diag.n_coupling_constraints,
+        diag.n_total_constraints,
+        diag.coupling_fraction * 100,
     )
-    logger.info("  avg blocks/constraint : %.2f", avg_blocks)
+    logger.info("  avg blocks/constraint : %.2f", diag.avg_blocks_per_constraint)
     logger.info(
         "  edge cut count        : %d / %d (%.1f%%)",
-        edge_cut_count,
-        edge_index.size(1),
-        edge_cut_count / max(edge_index.size(1), 1) * 100,
+        diag.edge_cut_count,
+        diag.n_total_edges,
+        diag.edge_cut_fraction * 100,
     )
 
     # --- Step 3: Solve ---

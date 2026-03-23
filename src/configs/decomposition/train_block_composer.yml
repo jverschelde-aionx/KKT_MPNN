@@ -1,0 +1,99 @@
+block_composer:
+  # Paths
+  encoder_path: /home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/kkt_gnn_node_pretraining_experiments/run_gnn_policy-gv=2-lv=8-slice=512-point=13-lmbd=0.256-std=0.0-dim=128-l_mask=0.6-g_mask=0.05-l_e_mask=0.05-g_e_mask=0.6-dp=0.05-l_dim=128-conv=gatv2-heads=4_20260116_180614/best_encoder.pt # Pretrained encoder checkpoint (best_encoder.pt) — used frozen to encode subgraphs
+  model_path: /home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/finetune_CA_200/finetune_CA_200_gnn_baseline/kkt_gnn_finetuning_for_milp_experiments/run_gnn_policy-gv=2-lv=8-slice=512-point=13-lmbd=0.256-std=0.0-dim=128-l_mask=0.6-g_mask=0.05-l_e_mask=0.05-g_e_mask=0.6-dp=0.05-l_dim=128-conv=gatv2-heads=4_20260318_102025/best.pt # Full finetuned GNNPolicy checkpoint (best.pt) — provides heads + full baseline
+  lp_dir: /home/joachim-verschelde/Repos/KKT_MPNN/src/data/instances/milp/CA/instance/val/100/
+  val_lp_dir: ""
+  save_dir: ./experiments/block_composer
+  output_csv: ""
+
+  # Decomposition
+  halo_hops: 0 # Primary experiment: halo 0 (largest info gap)
+  max_subgraph_ratio: 0.2
+
+  # Model architecture
+  d_z: 128 # Block GNN output dim
+  d_mlp_hidden: 256 # Composer MLP hidden dim
+  heads: 4 # GATv2 attention heads
+  composer_dropout: 0.05
+
+  # Ablation flags
+  use_block_context: 1 # 0 = local MLP baseline
+  use_block_gnn: 1 # 0 = pooled block-context MLP baseline
+
+  # KKT loss weights (match finetune defaults)
+  primal_weight: 0.1
+  dual_weight: 0.1
+  stationarity_weight: 0.6
+  complementary_slackness_weight: 0.2
+
+  # Training
+  optimizer: adam
+  weight_decay: 0.0
+  lr: 0.001
+  scheduler: cosine_warmup
+  warmup_pct: 0.05
+  min_lr_ratio: 0.1
+  epochs: 50
+  grad_accum_steps: 4
+  max_grad_norm: 1.0
+  early_stop_patience: 10
+  log_every: 1
+  seed: 42
+  device: cuda:0
+
+data:
+  problems: ["CA", "SC", "IS", "CFL"]
+  is_sizes: [50]
+  ca_sizes: [25]
+  sc_sizes: [50]
+  cfl_sizes: [50]
+  rnd_sizes: [50]
+  data_root: ./data/instances
+  n_instances: 50000
+  val_split: 0.15
+
+model:
+  lejepa_lambda: 0.256
+  lejepa_n_global_views: 2
+  lejepa_n_local_views: 8
+  sigreg_slices: 512
+  sigreg_points: 13
+
+mlp:
+  hidden: 256
+  embed_dim: 128
+  lejepa_local_mask: [0.40, 0.20, 0.20]
+
+gnn:
+  embedding_size: 128
+  cons_nfeats: 4
+  edge_nfeats: 1
+  var_nfeats: 18
+  num_emb_type: periodic
+  num_emb_bins: 32
+  num_emb_freqs: 16
+  lejepa_local_mask: 0.6
+  lejepa_global_mask: 0.05
+  lejepa_global_edge_mask: 0.6
+  lejepa_local_edge_mask: 0.05
+  bipartite_conv: gatv2
+  attn_heads: 4
+  dropout: 0.05
+
+training:
+  use_bipartite_graphs: true
+  optimizer: adam
+  weight_decay: 0.0
+  scheduler: cosine_warmup
+  warmup_pct: 0.05
+  min_lr_ratio: 0.1
+  devices: "0"
+  batch_size: 80
+  epochs: 50
+  lr: 0.001
+  seed: 42
+  log_every: 10
+  wandb_project: block_gnn_composer_experiments
+  experiments_dir: ./experiments
+  finetune_mode: heads
