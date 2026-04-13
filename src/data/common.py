@@ -55,7 +55,13 @@ class ConstraintFeature:
     AVG_COEF = 0
     DEGREE = 1
     RHS = 2
-    SENSE = 3
+    # One-hot row type (6 categories): leq, geq_flip, eq_pos, eq_neg, ub, lb
+    ROW_TYPE_LEQ = 3
+    ROW_TYPE_GEQ_FLIP = 4
+    ROW_TYPE_EQ_POS = 5
+    ROW_TYPE_EQ_NEG = 6
+    ROW_TYPE_UB = 7
+    ROW_TYPE_LB = 8
 
 
 class EdgeFeature:
@@ -64,4 +70,4 @@ class EdgeFeature:
 
 SCIP_INF = 1e20
 VARS_PAD = 18
-CONS_PAD = 4
+CONS_PAD = 9  # 3 scalar + 6 one-hot row type

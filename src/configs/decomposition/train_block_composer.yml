@@ -2,8 +2,8 @@ block_composer:
   # Paths
   encoder_path: /home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/kkt_gnn_node_pretraining_experiments/run_gnn_policy-gv=2-lv=8-slice=512-point=13-lmbd=0.256-std=0.0-dim=128-l_mask=0.6-g_mask=0.05-l_e_mask=0.05-g_e_mask=0.6-dp=0.05-l_dim=128-conv=gatv2-heads=4_20260116_180614/best_encoder.pt # Pretrained encoder checkpoint (best_encoder.pt) — used frozen to encode subgraphs
   model_path: /home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/finetune_CA_200/finetune_CA_200_gnn_baseline/kkt_gnn_finetuning_for_milp_experiments/run_gnn_policy-gv=2-lv=8-slice=512-point=13-lmbd=0.256-std=0.0-dim=128-l_mask=0.6-g_mask=0.05-l_e_mask=0.05-g_e_mask=0.6-dp=0.05-l_dim=128-conv=gatv2-heads=4_20260318_102025/best.pt # Full finetuned GNNPolicy checkpoint (best.pt) — provides heads + full baseline
-  lp_dir: /home/joachim-verschelde/Repos/KKT_MPNN/src/data/instances/milp/CA/instance/val/100/
-  val_lp_dir: ""
+  lp_dir: /home/joachim-verschelde/Repos/KKT_MPNN/src/data/instances/milp/CA/instance/train/100/
+  val_lp_dir: /home/joachim-verschelde/Repos/KKT_MPNN/src/data/instances/milp/CA/instance/val/100/
   save_dir: ./experiments/block_composer
   output_csv: ""
 
@@ -41,6 +41,7 @@ block_composer:
   log_every: 1
   seed: 42
   device: cuda:0
+  wandb_project: block_gnn_composer_experiments
 
 data:
   problems: ["CA", "SC", "IS", "CFL"]
@@ -67,7 +68,7 @@ mlp:
 
 gnn:
   embedding_size: 128
-  cons_nfeats: 4
+  cons_nfeats: 9
   edge_nfeats: 1
   var_nfeats: 18
   num_emb_type: periodic

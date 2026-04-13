@@ -12,7 +12,6 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch as PyGBatch
 from torch_geometric.loader import DataLoader as PyGDataLoader
-from zmq import device
 
 import wandb
 from data.common import ProblemClass
@@ -56,10 +55,9 @@ class TrainingState:
     def __init__(self, log_every: int) -> None:
         self.log_every = max(1, int(log_every))
         self.steps: int = 0
-        self.epoch: int = 0
-        self.items: int = 0  # number of graphs processed in current epoch
+        self.items: int = 0  # number of graphs processed since last reset
 
-        # Running sums (epoch)
+        # Running sums (between eval rounds)
         self.kkt_sum: float = 0.0
         self.primal_sum: float = 0.0
         self.dual_sum: float = 0.0
@@ -84,7 +82,8 @@ class TrainingState:
         self.stat_sum += float(stat)
         self.comp_sum += float(comp)
 
-    def finish_epoch(self) -> Tuple[float, float, float, float, float]:
+    def finish_round(self) -> Tuple[float, float, float, float, float]:
+        """Return averages since last reset and zero accumulators."""
         denom = max(1, self.items)
         out = (
             self.kkt_sum / denom,
@@ -97,7 +96,6 @@ class TrainingState:
         self.kkt_sum = self.primal_sum = self.dual_sum = self.stat_sum = (
             self.comp_sum
         ) = 0.0
-        self.epoch += 1
         return out
 
 
@@ -108,12 +106,16 @@ def build_arg_parser() -> configargparse.ArgumentParser:
             "configs/finetune/milp/IS/finetune_IS_50/finetune_IS_50_gnn_baseline.yml"
         ],
     )
-    parser.add_argument("--config", is_config_file=True, help="Path to config YAML file")
+    parser.add_argument(
+        "--config", is_config_file=True, help="Path to config YAML file"
+    )
     # Training
     t = parser.add_argument_group("training")
     t.add_argument("--devices", type=str, default="0")
     t.add_argument("--batch_size", type=int, default=8)
-    t.add_argument("--epochs", type=int, default=20)
+    t.add_argument("--max_steps", type=int, default=20000)
+    t.add_argument("--eval_every_steps", type=int, default=500)
+    t.add_argument("--save_every_steps", type=int, default=500)
     t.add_argument("--lr", type=float, default=1e-3)
     t.add_argument("--num_workers", type=int, default=0)
     t.add_argument("--seed", type=int, default=0)
@@ -134,10 +136,6 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     t.add_argument("--min_lr_ratio", type=float, default=0.0)
     t.add_argument("--max_grad_norm", type=float, default=0.0)
 
-    # Early stopping
-    t.add_argument("--early_stop_patience", type=int, default=3000)
-    t.add_argument("--early_stop_min_delta", type=float, default=0.0)
-
     # Finetune mode
     t.add_argument(
         "--finetune_mode",
@@ -152,13 +150,13 @@ def build_arg_parser() -> configargparse.ArgumentParser:
         help="Path to encoder-only checkpoint from pretraining (e.g., .../best_encoder.pt).",
     )
     t.add_argument(
-        "--unfreeze_epoch",
+        "--unfreeze_step",
         type=int,
         default=0,
-        help="When finetune_mode='heads', unfreeze encoder after this many epochs. 0 = stay frozen.",
+        help="When finetune_mode='heads', unfreeze encoder after this many steps. 0 = stay frozen.",
     )
     t.add_argument(
-        "--save_epoch_list", type=int, nargs="+", default=[1, 2, 5, 10, 20, 30]
+        "--save_step_list", type=int, nargs="+", default=[500, 1000, 2000, 5000]
     )
     t.add_argument("--primal_weight", type=float, default=0.1)
     t.add_argument("--dual_weight", type=float, default=0.1)
@@ -190,7 +188,7 @@ def build_arg_parser() -> configargparse.ArgumentParser:
         "--surrogate_warmup_frac",
         type=float,
         default=0.3,
-        help="Surrogate: fraction of epochs with beta=0",
+        help="Surrogate: fraction of steps with beta=0",
     )
 
     # Data
@@ -231,9 +229,15 @@ def build_arg_parser() -> configargparse.ArgumentParser:
     return parser
 
 
-def train_epoch(
+def _cycling_loader(loader):
+    """Yield batches forever, re-shuffling each pass through the dataset."""
+    while True:
+        yield from loader
+
+
+def train_step(
     model: LeJepaEncoderModule,
-    loader: Union[PyGDataLoader, DataLoader],
+    batch,
     optimizer: torch.optim.Optimizer,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     device: torch.device,
@@ -246,111 +250,96 @@ def train_epoch(
     surrogate_alpha: float = 0.0,
     surrogate_delta: float = 0.0,
     surrogate_beta: float = 0.0,
-) -> Tuple[float, float, float, float, float]:
+) -> None:
     model.train()
-    for batch in loader:
-        if isinstance(batch[0], PyGBatch):
-            (
-                batch_graph,
-                A,
-                b,
-                c,
-                mask_m,
-                mask_n,
-                m_sizes,
-                n_sizes,
-                *rest,
-            ) = batch
-            batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes, sample_paths = batch
+    if isinstance(batch[0], PyGBatch):
+        batch_graph, A, b, c, mask_m, mask_n, m_sizes, n_sizes, sample_paths = batch
 
-            batch_graph = batch_graph.to(device, non_blocking=True)
-            A, b, c = A.to(device), b.to(device), c.to(device)
-            mask_m, mask_n = mask_m.to(device), mask_n.to(device)
+        batch_graph = batch_graph.to(device, non_blocking=True)
+        A, b, c = A.to(device), b.to(device), c.to(device)
+        mask_m, mask_n = mask_m.to(device), mask_n.to(device)
 
-            # forward: flat predictions across all nodes in the merged batch
-            x_all, lam_all = model(
-                batch_graph.constraint_features,
-                batch_graph.edge_index,
-                batch_graph.edge_attr,
-                batch_graph.variable_features,
-            )
+        # forward: flat predictions across all nodes in the merged batch
+        x_all, lam_all = model(
+            batch_graph.constraint_features,
+            batch_graph.edge_index,
+            batch_graph.edge_attr,
+            batch_graph.variable_features,
+        )
 
-            # pack back to [B, max_*]
-            x_pred = pack_by_sizes(x_all, n_sizes, c.shape[1])  # [B, n_max]
-            lam_pred = pack_by_sizes(lam_all, m_sizes, b.shape[1])  # [B, m_max]
-            y_pred = torch.cat([x_pred, lam_pred], dim=1)  # [B, n_max+m_max]
+        # pack back to [B, max_*]
+        x_pred = pack_by_sizes(x_all, n_sizes, c.shape[1])  # [B, n_max]
+        lam_pred = pack_by_sizes(lam_all, m_sizes, b.shape[1])  # [B, m_max]
+        y_pred = torch.cat([x_pred, lam_pred], dim=1)  # [B, n_max+m_max]
 
-            n_graphs = int(A.size(0))
-        else:
-            model_input, A, b, c, mask_m, mask_n, *_ = batch
+        n_graphs = int(A.size(0))
+    else:
+        model_input, A, b, c, mask_m, mask_n, *_ = batch
 
-            model_input = model_input.to(device, non_blocking=True)
-            A, b, c = A.to(device), b.to(device), c.to(device)
-            mask_m, mask_n = mask_m.to(device), mask_n.to(device)
+        model_input = model_input.to(device, non_blocking=True)
+        A, b, c = A.to(device), b.to(device), c.to(device)
+        mask_m, mask_n = mask_m.to(device), mask_n.to(device)
 
-            y_pred = model(model_input)  # [B, n+m]
-            n_graphs = int(A.size(0))
+        y_pred = model(model_input)  # [B, n+m]
+        n_graphs = int(A.size(0))
 
-        loss, metrics = kkt(
-            y_pred=y_pred,
+    loss, metrics = kkt(
+        y_pred=y_pred,
+        A=A,
+        b=b,
+        c=c,
+        mask_m=mask_m,
+        mask_n=mask_n,
+        primal_weight=primal_weight,
+        dual_weight=dual_weight,
+        stationarity_weight=stationarity_weight,
+        complementary_slackness_weight=complementary_slackness_weight,
+    )
+
+    # Surrogate loss (optional addition to KKT loss)
+    if surrogate_alpha > 0.0:
+        n = A.shape[2]
+        loss_surr, surr_metrics = surrogate_loss(
+            x_pred=y_pred[:, :n],
             A=A,
             b=b,
             c=c,
             mask_m=mask_m,
             mask_n=mask_n,
-            primal_weight=primal_weight,
-            dual_weight=dual_weight,
-            stationarity_weight=stationarity_weight,
-            complementary_slackness_weight=complementary_slackness_weight,
+            violation_weight=surrogate_alpha,
+            objective_weight=surrogate_delta,
+            integrality_weight=surrogate_beta,
         )
+        loss = loss + loss_surr
+        metrics["kkt_only"] = metrics["kkt_loss"]
+        metrics["surrogate_total"] = loss_surr.item()
+        metrics["surrogate_viol"] = float(surr_metrics["surrogate_viol"].mean())
+        metrics["surrogate_obj"] = float(surr_metrics["surrogate_obj"].mean())
+        metrics["surrogate_int"] = float(surr_metrics["surrogate_int"].mean())
+        metrics["binary_pressure"] = metrics["surrogate_int"]
 
-        # Surrogate loss (optional addition to KKT loss)
-        if surrogate_alpha > 0.0:
-            n = A.shape[2]
-            loss_surr, surr_metrics = surrogate_loss(
-                x_pred=y_pred[:, :n],
-                A=A,
-                b=b,
-                c=c,
-                mask_m=mask_m,
-                mask_n=mask_n,
-                violation_weight=surrogate_alpha,
-                objective_weight=surrogate_delta,
-                integrality_weight=surrogate_beta,
-            )
-            loss = loss + loss_surr
-            metrics["kkt_only"] = metrics["kkt_loss"]
-            metrics["surrogate_total"] = loss_surr.item()
-            metrics["surrogate_viol"] = float(surr_metrics["surrogate_viol"].mean())
-            metrics["surrogate_obj"] = float(surr_metrics["surrogate_obj"].mean())
-            metrics["surrogate_int"] = float(surr_metrics["surrogate_int"].mean())
-            metrics["binary_pressure"] = metrics["surrogate_int"]
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    if max_grad_norm and max_grad_norm > 0.0:
+        clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+    optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        if max_grad_norm and max_grad_norm > 0.0:
-            clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-        optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
+    state.step(n_graphs)
+    state.add(
+        float(metrics["kkt_loss"]) * n_graphs,
+        float(metrics["primal_feasibility"]) * n_graphs,
+        float(metrics["dual_feasibility"]) * n_graphs,
+        float(metrics["stationarity"]) * n_graphs,
+        float(metrics["complementary_slackness"]) * n_graphs,
+    )
 
-        state.step(n_graphs)
-        # kkt(...) returns the *weighted* components; there's no "kkt_loss" key
-        state.add(
-            float(metrics["kkt_loss"]) * n_graphs,
-            float(metrics["primal_feasibility"]) * n_graphs,
-            float(metrics["dual_feasibility"]) * n_graphs,
-            float(metrics["stationarity"]) * n_graphs,
-            float(metrics["complementary_slackness"]) * n_graphs,
+    if state.should_log:
+        wandb.log(
+            {f"train/{key}": value for key, value in metrics.items()},
+            step=state.steps,
         )
-
-        if state.should_log:
-            wandb.log(
-                {f"train/{key}": value for key, value in metrics.items()},
-                step=state.steps,
-            )
-
-    return state.finish_epoch()
 
 
 @torch.no_grad()
@@ -549,6 +538,9 @@ def finetune(
         if overrides is not None:
             apply_overrides(args, overrides)
 
+        # make_scheduler expects args.epochs; set epochs=1 so total_steps = max_steps
+        args.epochs = 1
+
         run_name = Path(config_path).stem if config_path else None
         wandb.init(project=args.wandb_project, name=run_name)
 
@@ -593,45 +585,50 @@ def finetune(
         save_dir = init_logging_and_dirs(args, model)
         model.load_model_and_encoder(args, logger)
         optimizer = make_optimizer(model, args)
-        scheduler = make_scheduler(optimizer, args, steps_per_epoch=len(train_loader))
+        scheduler = make_scheduler(optimizer, args, steps_per_epoch=args.max_steps)
 
         state = TrainingState(log_every=args.log_every)
 
         best_val: float = float("inf")
-        best_epoch: int = 0
-        epochs_no_improve: int = 0
+        best_step: int = 0
+        encoder_unfrozen: bool = False
         print(f"device: {device}")
-        # Train loop
-        for epoch in range(1, args.epochs + 1):
-            # Gradual encoder unfreeze
+
+        train_iter = _cycling_loader(train_loader)
+
+        # Step-based train loop
+        for step in range(1, args.max_steps + 1):
+            # Gradual encoder unfreeze (once)
             if (
-                args.finetune_mode == "heads"
-                and args.unfreeze_epoch > 0
-                and epoch == args.unfreeze_epoch + 1
+                not encoder_unfrozen
+                and args.finetune_mode == "heads"
+                and args.unfreeze_step > 0
+                and step == args.unfreeze_step
             ):
                 model.unfreeze_encoder()
                 optimizer = rebuild_optimizer_for_unfreeze(model, optimizer, args)
                 scheduler = make_scheduler(
-                    optimizer, args, steps_per_epoch=len(train_loader)
+                    optimizer, args, steps_per_epoch=args.max_steps
                 )
+                encoder_unfrozen = True
                 total = sum(p.numel() for p in model.parameters() if p.requires_grad)
                 enc = sum(
                     p.numel() for p in model.encoder.parameters() if p.requires_grad
                 )
                 logger.info(
-                    "Unfreezing encoder at epoch {}. Trainable params: total={:,} | encoder={:,} | heads={:,}",
-                    epoch,
+                    "Unfreezing encoder at step {}. Trainable params: total={:,} | encoder={:,} | heads={:,}",
+                    step,
                     total,
                     enc,
                     total - enc,
                 )
-                wandb.log({"encoder_unfrozen": True, "epoch": epoch}, step=state.steps)
+                wandb.log({"encoder_unfrozen": True, "step": step}, step=state.steps)
 
-            # Compute surrogate beta for this epoch (0.0 if surrogate disabled)
+            # Compute surrogate beta for this step (0.0 if surrogate disabled)
             surr_beta = (
                 get_surrogate_beta(
-                    epoch=state.epoch,
-                    total_epochs=args.epochs,
+                    epoch=step,
+                    total_epochs=args.max_steps,
                     integrality_weight_final=args.surrogate_beta_final,
                     warmup_frac=args.surrogate_warmup_frac,
                 )
@@ -641,9 +638,10 @@ def finetune(
             surr_alpha = args.surrogate_alpha if args.use_surrogate else 0.0
             surr_delta = args.surrogate_delta if args.use_surrogate else 0.0
 
-            train_kkt, train_pr, train_du, train_st, train_cp = train_epoch(
+            batch = next(train_iter)
+            train_step(
                 model=model,
-                loader=train_loader,
+                batch=batch,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 device=device,
@@ -658,79 +656,83 @@ def finetune(
                 surrogate_beta=surr_beta,
             )
 
-            val_metrics = eval_epoch(
-                model=model,
-                loader=valid_loader,
-                device=device,
-                primal_weight=args.primal_weight,
-                dual_weight=args.dual_weight,
-                stationarity_weight=args.stationarity_weight,
-                complementary_slackness_weight=args.complementary_slackness_weight,
-                surrogate_alpha=surr_alpha,
-                surrogate_delta=surr_delta,
-                surrogate_beta=args.surrogate_beta_final if args.use_surrogate else 0.0,
-            )
-            val_loss = val_metrics["valid/kkt_loss"]
+            # Save periodic checkpoints
+            if step % args.save_every_steps == 0 or step == args.max_steps:
+                ckpt = {
+                    "step": step,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "args": vars(args),
+                }
+                torch.save(ckpt, save_dir / "last.pt")
+                # Encoder-only artifact (finetuned encoder)
+                model.save_encoder(str(save_dir / "last_encoder.pt"))
 
-            log_dict = {
-                "epoch": epoch,
-                "train/kkt_loss": train_kkt,
-                "train/primal_feas": train_pr,
-                "train/dual_feas": train_du,
-                "train/stationarity": train_st,
-                "train/comp_slack": train_cp,
-                **val_metrics,
-                "lr": optimizer.param_groups[0]["lr"],
-            }
-            wandb.log(log_dict, step=state.steps)
+            if step in args.save_step_list:
+                logger.info("Saving checkpoint for step {}", step)
+                ckpt = {
+                    "step": step,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "args": vars(args),
+                }
+                torch.save(ckpt, save_dir / f"step_{step:06d}.pt")
 
-            # Save checkpoints
-            ckpt = {
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "args": vars(args),
-            }
-            torch.save(ckpt, save_dir / "last.pt")
-            # Encoder-only artifact (finetuned encoder)
-            model.save_encoder(str(save_dir / "last_encoder.pt"))
+            # Eval at intervals
+            if step % args.eval_every_steps == 0 or step == args.max_steps:
+                val_metrics = eval_epoch(
+                    model=model,
+                    loader=valid_loader,
+                    device=device,
+                    primal_weight=args.primal_weight,
+                    dual_weight=args.dual_weight,
+                    stationarity_weight=args.stationarity_weight,
+                    complementary_slackness_weight=args.complementary_slackness_weight,
+                    surrogate_alpha=surr_alpha,
+                    surrogate_delta=surr_delta,
+                    surrogate_beta=args.surrogate_beta_final
+                    if args.use_surrogate
+                    else 0.0,
+                )
+                val_loss = val_metrics["valid/kkt_loss"]
 
-            if epoch in args.save_epoch_list:
-                print(f"Saving checkpoint for epoch {epoch}")
-                torch.save(ckpt, save_dir / f"epoch_{epoch:03d}.pt")
+                train_kkt, train_pr, train_du, train_st, train_cp = state.finish_round()
 
-            improved = val_loss < (best_val - args.early_stop_min_delta)
+                log_dict = {
+                    "step": step,
+                    "train/kkt_loss": train_kkt,
+                    "train/primal_feas": train_pr,
+                    "train/dual_feas": train_du,
+                    "train/stationarity": train_st,
+                    "train/comp_slack": train_cp,
+                    **val_metrics,
+                    "lr": optimizer.param_groups[0]["lr"],
+                }
+                wandb.log(log_dict, step=state.steps)
 
-            if improved:
-                best_val = float(val_loss)
-                best_epoch = epoch
-                epochs_no_improve = 0
-                torch.save(ckpt, save_dir / "best.pt")
-                wandb.run.summary["best_val_kkt"] = best_val
-                wandb.run.summary["best_epoch"] = best_epoch
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= int(args.early_stop_patience):
-                    logger.info(
-                        "Early stopping at epoch {:03d}: no val improvement for {} epochs "
-                        "(best {:.6f} at epoch {:03d})",
-                        epoch,
-                        epochs_no_improve,
-                        best_val,
-                        best_epoch,
-                    )
-                    wandb.run.summary["early_stop"] = True
-                    wandb.run.summary["early_stop_epoch"] = epoch
-                    break
+                # Save best checkpoint
+                ckpt = {
+                    "step": step,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "args": vars(args),
+                }
 
-            logger.info(
-                "Epoch {:03d} | train KKT {:.4f} | valid KKT {:.4f} (best {:.4f} @ {:03d})",
-                epoch,
-                train_kkt,
-                val_loss,
-                best_val,
-                best_epoch,
-            )
+                if val_loss < best_val:
+                    best_val = float(val_loss)
+                    best_step = step
+                    torch.save(ckpt, save_dir / "best.pt")
+                    wandb.run.summary["best_val_kkt"] = best_val
+                    wandb.run.summary["best_step"] = best_step
+
+                logger.info(
+                    "Step {:05d} | train KKT {:.4f} | valid KKT {:.4f} (best {:.4f} @ step {})",
+                    step,
+                    train_kkt,
+                    val_loss,
+                    best_val,
+                    best_step,
+                )
 
         logger.info("Finished finetuning. Best validation KKT loss = {:.6f}", best_val)
 

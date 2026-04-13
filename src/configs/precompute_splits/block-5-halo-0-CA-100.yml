@@ -1,0 +1,6 @@
+problems: ["CA"]
+ca_sizes: [100]
+data_root: ./data/instances/milp/finetune
+
+num_blocks: 5
+halo_hops: 0

@@ -1,0 +1,10 @@
+problems: ["CA", "SC", "IS", "CFL"]
+is_sizes: [10, 50, 200]
+ca_sizes: [5, 25, 100]
+sc_sizes: [10, 50, 200]
+cfl_sizes: [10, 50, 200]
+rnd_sizes: [10, 50, 200]
+data_root: ./data/instances/milp
+
+max_owned_nodes: 50
+halo_hops: 0

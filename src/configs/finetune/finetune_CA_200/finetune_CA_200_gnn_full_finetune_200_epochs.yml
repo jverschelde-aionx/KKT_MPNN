@@ -20,7 +20,7 @@ mlp:
   embed_dim: 128
 gnn:
   embedding_size: 128
-  cons_nfeats: 4
+  cons_nfeats: 9
   edge_nfeats: 1
   var_nfeats: 18
   num_emb_type: periodic

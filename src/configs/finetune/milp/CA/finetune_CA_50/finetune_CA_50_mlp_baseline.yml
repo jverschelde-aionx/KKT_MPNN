@@ -6,7 +6,7 @@ data:
   cfl_sizes: [50]
   rnd_sizes: [50]
   n_instances: 50000
-  data_root: ./data/instances/milp
+  data_root: ./data/instances/milp/finetune
   val_split: 0.15
 
 model:
@@ -21,7 +21,7 @@ mlp:
   embed_dim: 128
 gnn:
   embedding_size: 128
-  cons_nfeats: 4
+  cons_nfeats: 9
   edge_nfeats: 1
   var_nfeats: 18
   num_emb_type: periodic
@@ -48,8 +48,8 @@ training:
   lr: 0.001
   seed: 42
   log_every: 10
-  wandb_project: kkt_gnn_finetuning_for_milp_experiments
-  experiments_dir: ./experiments/finetune_CA_50/finetune_CA_50_mlp_baseline
+  wandb_project: gnn_finetuning
+  experiments_dir: ./experiments/gnn_finetuning/finetune_CA_50/finetune_CA_50_mlp_baseline
   finetune_mode: full
   use_surrogate: true
   surrogate_alpha: 10.0

@@ -1,0 +1,27 @@
+# Problem types to generate
+problems: ["CA", "SC", "IS", "CFL"]
+is_sizes: [10, 50, 200]
+ca_sizes: [5, 25, 100]
+sc_sizes: [10, 50, 200]
+cfl_sizes: [10, 50, 200]
+
+# Data splits
+test_split: 0.15
+val_split: 0.15
+
+# Dataset size
+n_instances: 20000
+
+# Paths
+data_root: ./data/instances/milp/finetune
+
+# Processing options
+relax: false
+solve: true
+add_pos_feat: true
+norm_pos_feat: true
+normalize_features: true
+
+# System
+gurobi_threads: 4
+n_jobs: 32

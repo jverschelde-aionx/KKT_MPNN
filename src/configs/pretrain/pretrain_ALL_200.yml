@@ -5,7 +5,7 @@ data:
   sc_sizes: [200]
   cfl_sizes: [200]
   rnd_sizes: [200]
-  data_root: ./data/instances/milp
+  data_root: ./data/instances/milp/pretrain
   n_instances: 50000
   val_split: 0.15
 
@@ -22,7 +22,7 @@ mlp:
   lejepa_local_mask: [0.40, 0.20, 0.20] # Local views masking ratios
 gnn:
   embedding_size: 128
-  cons_nfeats: 4
+  cons_nfeats: 9
   edge_nfeats: 1
   var_nfeats: 18
   num_emb_type: periodic
@@ -44,12 +44,15 @@ training:
   warmup_pct: 0.05
   min_lr_ratio: 0.1
   devices: "0"
-  batch_size: 80
-  epochs: 400
+  batch_size: 40
+  max_steps: 200000
+  eval_every_steps: 500
+  save_every_steps: 500
   lr: 0.0015
   seed: 42
   log_every: 10
-  wandb_project: kkt_gnn_bijepa_for_milp_experiments
+  wandb_project: gnn_pretraining
   experiments_dir: ./experiments
+  early_stop_patience: 500000
   lejepa_lambda_start: 0.90
-  lejepa_lambda_warm_epochs: 100
+  lejepa_lambda_warm_steps: 1000

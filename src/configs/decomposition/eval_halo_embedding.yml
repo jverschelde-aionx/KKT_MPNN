@@ -33,7 +33,7 @@ mlp:
   lejepa_local_mask: [0.40, 0.20, 0.20] # Local views masking ratios
 gnn:
   embedding_size: 128
-  cons_nfeats: 4
+  cons_nfeats: 9
   edge_nfeats: 1
   var_nfeats: 18
   num_emb_type: periodic

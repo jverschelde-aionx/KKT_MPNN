@@ -211,9 +211,9 @@ class GNNPolicy(LeJepaEncoderModule):
         )
         group.add_argument(
             "--cons_nfeats",
-            default=4,
+            default=9,
             type=int,
-            help="Number of features for constraints",
+            help="Number of features for constraints (3 scalar + 6 one-hot row type)",
         )
         group.add_argument(
             "--edge_nfeats", default=1, type=int, help="Number of features for edges"

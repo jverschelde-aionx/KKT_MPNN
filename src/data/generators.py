@@ -126,6 +126,86 @@ def _constraint_sense_code(problem, constraint) -> Tuple[int, float]:
     return 1, lhs  # >=
 
 
+# ---------------------------------------------------------------------------
+# Row-type codes for standardized <= rows (used in constraint node features)
+# ---------------------------------------------------------------------------
+ROW_TYPE_LEQ = 0  # original <= row
+ROW_TYPE_GEQ_FLIP = 1  # original >= row, sign-flipped to <=
+ROW_TYPE_EQ_POS = 2  # positive half of split equality
+ROW_TYPE_EQ_NEG = 3  # negative half of split equality
+ROW_TYPE_UB = 4  # variable upper bound: x_j <= ub
+ROW_TYPE_LB = 5  # variable lower bound: -x_j <= -lb
+N_ROW_TYPES = 6
+
+
+@dataclass
+class StandardizedRow:
+    """One row of the standardized all-<= system used for the KKT loss."""
+
+    coeffs: Dict  # {scip_var_obj: float} — signed coefficients
+    rhs: float
+    row_type: int  # one of ROW_TYPE_*
+
+
+def _standardize_rows(
+    problem,
+    conss_all: list,
+    scip_variables: list,
+    v_map: Dict[str, int],
+) -> List[StandardizedRow]:
+    """Convert all original constraints + variable bounds into <= rows.
+
+    Returns one StandardizedRow per KKT row. The graph, edge_index/edge_attr,
+    c_nodes, A, and b_vec should all be built from this list so they are
+    guaranteed to be consistent.
+    """
+    rows: List[StandardizedRow] = []
+
+    # 1) Original linear constraints
+    for constraint in conss_all:
+        coeffs = problem.getValsLinear(constraint)  # dict[var]->coef
+        rhs = float(problem.getRhs(constraint))
+        lhs = float(problem.getLhs(constraint))
+
+        if abs(rhs - lhs) < 1e-12:
+            # equality -> two <= rows
+            rows.append(StandardizedRow(
+                coeffs=dict(coeffs), rhs=rhs, row_type=ROW_TYPE_EQ_POS,
+            ))
+            rows.append(StandardizedRow(
+                coeffs={v: -c for v, c in coeffs.items()},
+                rhs=-lhs,
+                row_type=ROW_TYPE_EQ_NEG,
+            ))
+        elif rhs < 1e20:
+            # already <=
+            rows.append(StandardizedRow(
+                coeffs=dict(coeffs), rhs=rhs, row_type=ROW_TYPE_LEQ,
+            ))
+        else:
+            # >= lhs -> flip to <=
+            rows.append(StandardizedRow(
+                coeffs={v: -c for v, c in coeffs.items()},
+                rhs=-lhs,
+                row_type=ROW_TYPE_GEQ_FLIP,
+            ))
+
+    # 2) Finite variable bounds (use var.name as key since SCIP Variable is unhashable)
+    for var in scip_variables:
+        ub = float(var.getUbOriginal())
+        lb = float(var.getLbOriginal())
+        if ub < 1e20:
+            rows.append(StandardizedRow(
+                coeffs={var.name: 1.0}, rhs=ub, row_type=ROW_TYPE_UB,
+            ))
+        if lb > -1e20:
+            rows.append(StandardizedRow(
+                coeffs={var.name: -1.0}, rhs=-lb, row_type=ROW_TYPE_LB,
+            ))
+
+    return rows
+
+
 def relax_problem(lp_path: Path) -> None:
     """
     Relax the on-disk model to a linear program.
@@ -590,71 +670,57 @@ def get_bipartite_graph(
     conss_all = [c for c in problem.getConss() if len(problem.getValsLinear(c)) > 0]
     # stable order: by nnz then name
     conss_all.sort(key=lambda c: (len(problem.getValsLinear(c)), str(c)))
-    m_orig = len(conss_all)
 
-    # edge_index/attr and constraint features
+    # Build the unified standardized-row system.
+    # Graph edges, constraint node features, A, and b_vec are ALL derived
+    # from these rows so they are guaranteed consistent.
+    std_rows = _standardize_rows(problem, conss_all, scip_variables, v_map)
+    m_std = len(std_rows)
+
     gi_rows: List[int] = []
     gi_cols: List[int] = []
     edge_attr_vals: List[float] = []
-    c_rows_feats: List[List[float]] = []  # [avg_row_coef, degree, rhs, sense_code]
-    graph_rhs: List[float] = []
-    graph_sense: List[int] = []
+    c_rows_feats: List[List[float]] = []  # [avg_coef, degree, rhs, row_type_0..5]
+    b_leq: List[float] = []
 
-    for constraint_idx, constraint in enumerate(conss_all):
-        coeffs = problem.getValsLinear(constraint)  # dict[var] -> coef
-        sense_code, rhs_or_lhs = _constraint_sense_code(problem, constraint)
+    for row_idx, srow in enumerate(std_rows):
         deg = 0
         ssum = 0.0
-        for var_obj, coef in coeffs.items():
+        for var_obj, coef in srow.coeffs.items():
             coef = float(coef)
             if coef == 0.0:
                 continue
-            variable_idx = v_map[var_obj]
-            gi_rows.append(constraint_idx)
+            variable_idx = v_map[var_obj.name if hasattr(var_obj, "name") else str(var_obj)]
+            gi_rows.append(row_idx)
             gi_cols.append(variable_idx)
-            edge_attr_vals.append(coef)  # TRUE coefficient on the edge
+            edge_attr_vals.append(coef)
             deg += 1
             ssum += coef
             # update variable-side statistics
-            v_feats[variable_idx, VariableFeature.DEGREE] += 1.0  # degree
-            v_feats[variable_idx, VariableFeature.AVG_COEF] += (
-                coef  # sum of coefs (avg later)
-            )
+            v_feats[variable_idx, VariableFeature.DEGREE] += 1.0
+            v_feats[variable_idx, VariableFeature.AVG_COEF] += coef
             v_feats[variable_idx, VariableFeature.MAX_COEF] = max(
                 v_feats[variable_idx, VariableFeature.MAX_COEF], coef
             )
             v_feats[variable_idx, VariableFeature.MIN_COEF] = min(
                 v_feats[variable_idx, VariableFeature.MIN_COEF], coef
             )
-        avg_row = ssum / max(deg, 1)
-        c_rows_feats.append([avg_row, float(deg), float(rhs_or_lhs), float(sense_code)])
-        graph_rhs.append(float(rhs_or_lhs))
-        graph_sense.append(int(sense_code))
 
-    # Build paper-view tensors
+        avg_row = ssum / max(deg, 1)
+        # Constraint node features: [avg_coef, degree, rhs, one-hot row type (6)]
+        one_hot = [0.0] * N_ROW_TYPES
+        one_hot[srow.row_type] = 1.0
+        c_rows_feats.append([avg_row, float(deg), srow.rhs] + one_hot)
+        b_leq.append(srow.rhs)
+
+    # Build tensors — graph edges and KKT A are identical by construction
     edge_index = torch.tensor([gi_rows, gi_cols], dtype=torch.long)
     edge_attr = torch.tensor(edge_attr_vals, dtype=torch.float32).unsqueeze(1)
-    # binary incidence adjacency
-    incidence = torch.sparse_coo_tensor(
-        indices=edge_index,
-        values=torch.ones(len(edge_attr_vals), dtype=torch.float32),
-        size=(m_orig, n_variables),
-    ).coalesce()
 
     c_nodes = (
         torch.tensor(c_rows_feats, dtype=torch.float32)
         if c_rows_feats
-        else torch.zeros((0, 4), dtype=torch.float32)
-    )
-    graph_b = (
-        torch.tensor(graph_rhs, dtype=torch.float32)
-        if graph_rhs
-        else torch.zeros((0,), dtype=torch.float32)
-    )
-    graph_s = (
-        torch.tensor(graph_sense, dtype=torch.int32)
-        if graph_sense
-        else torch.zeros((0,), dtype=torch.int32)
+        else torch.zeros((0, 3 + N_ROW_TYPES), dtype=torch.float32)
     )
 
     # finalize variable avg coef = sum/degree
@@ -689,97 +755,54 @@ def get_bipartite_graph(
         pos_bits = encode_ranks_as_bits(v_nodes, ranks, feat_w=12)[:, -12:]
         v_nodes = torch.cat([v_nodes, pos_bits], dim=1)
 
-    # Add original coefficients needed for KKT loss calculation (<= rows incl. senses & bounds)
-    ind_rows: List[int] = []
-    ind_cols: List[int] = []
-    vals: List[float] = []
-    b_leq: List[float] = []
-
-    def _add_leq_row(coeffs_dict, rhs_val: float):
-        row = len(b_leq)
-        for var_obj, coef in coeffs_dict.items():
-            j = v_map[var_obj]
-            cval = float(coef)
-            if cval != 0.0:
-                ind_rows.append(row)
-                ind_cols.append(j)
-                vals.append(cval)
-        b_leq.append(float(rhs_val))
-
-    # fold each original row into <= form
-    for constraint in conss_all:
-        coeffs = problem.getValsLinear(constraint)  # dict[var]->coef
-        rhs = float(problem.getRhs(constraint))
-        lhs = float(problem.getLhs(constraint))
-        if abs(rhs - lhs) < 1e-12:
-            # equality -> two rows
-            _add_leq_row(coeffs, rhs)
-            _add_leq_row({v: -coef for v, coef in coeffs.items()}, -lhs)
-        elif rhs < 1e20:
-            # <= rhs
-            _add_leq_row(coeffs, rhs)
-        else:
-            # >= lhs -> -expr <= -lhs
-            _add_leq_row({v: -coef for v, coef in coeffs.items()}, -lhs)
-
-    # add finite variable bounds as <= rows
-    INF = 1e40
-    for var in scip_variables:
-        variable_idx = v_map[var.name]
-        try:
-            lb = float(var.getLb())
-            ub = float(var.getUb())
-        except Exception:
-            lb, ub = -INF, INF
-        if ub < INF:
-            _add_leq_row({var: +1.0}, ub)  # x_j <= ub
-        if lb > -INF:
-            _add_leq_row({var: -1.0}, -lb)  # -x_j <= -lb
-
+    # KKT A and b_vec — built from the SAME edge data (guaranteed consistent)
     A = torch.sparse_coo_tensor(
-        indices=torch.tensor([ind_rows, ind_cols], dtype=torch.long),
-        values=torch.tensor(vals, dtype=torch.float32),
+        indices=edge_index,
+        values=torch.tensor(edge_attr_vals, dtype=torch.float32),
         size=(len(b_leq), n_variables),
     ).coalesce()
     b_vec = torch.tensor(b_leq, dtype=torch.float32)
 
+    # Hard alignment assertions
+    assert c_nodes.size(0) == b_vec.numel(), (
+        f"c_nodes ({c_nodes.size(0)}) != b_vec ({b_vec.numel()})"
+    )
+    assert A.shape[0] == b_vec.numel(), (
+        f"A rows ({A.shape[0]}) != b_vec ({b_vec.numel()})"
+    )
+
     if normalize_features:
         # Apply min-max normalization to features
         if add_pos_feat and not normalize_pos_feat:
-            # normalize only first 6 numeric features, keep 20 bits crisp {0,1}
+            # normalize only first 6 numeric features, keep 12 bits crisp {0,1}
             v_num, v_bits = v_nodes[:, :6], v_nodes[:, 6:]
             v_num = _minmax_normalization(v_num).clamp_(1e-5, 1.0)
             v_nodes = torch.cat([v_num, v_bits], dim=1)
         else:
-            # normalize everything (numeric + bits, or numeric only if no pos bits)
             v_nodes = _minmax_normalization(v_nodes).clamp_(1e-5, 1.0)
 
-        c_nodes = (
-            _minmax_normalization(c_nodes).clamp_(1e-5, 1.0)
-            if c_nodes.numel() > 0
-            else c_nodes
-        )
+        # Normalize only the 3 scalar features, keep one-hot row-type crisp
+        if c_nodes.numel() > 0:
+            c_scalar, c_onehot = c_nodes[:, :3], c_nodes[:, 3:]
+            c_scalar = _minmax_normalization(c_scalar).clamp_(1e-5, 1.0)
+            c_nodes = torch.cat([c_scalar, c_onehot], dim=1)
     else:
-        # Normalization disabled - using raw features
         logger.info("Normalization disabled - using raw features")
 
-    # attach artifacts to A
-    # (So they can be accessed later without changing the return signature.)
-    A.edge_index = edge_index  # [2, nnz] over ORIGINAL constraints
-    A.edge_attr = edge_attr  # [nnz, 1] true A_ij
-    A.incidence = incidence  # (m_orig, n) binary adjacency
-    A.graph_b = graph_b  # [m_orig] rhs
-    A.graph_sense = graph_s  # [m_orig] sense codes
+    # Attach graph-edge artifacts to A for backward compatibility.
+    # edge_index and edge_attr now correspond to the standardized rows
+    # (same as A), so graph edges == KKT matrix entries.
+    A.edge_index = edge_index
+    A.edge_attr = edge_attr
 
-    # tensors to return
     b_vars = torch.tensor(b_idx, dtype=torch.int32)
 
     return (
         A,
         v_map,  # name -> column index
         v_nodes,  # variable node features [n, 6+12] in [0,1]
-        c_nodes,  # constraint node features [m_orig, 4] in [0,1]
+        c_nodes,  # constraint node features [m_std, 3+6] in [0,1]
         b_vars,  # indices of binary variables
-        b_vec,  # RHS for <= rows (KKT)
+        b_vec,  # RHS for standardized <= rows
         c_vec,  # objective for MIN
     )

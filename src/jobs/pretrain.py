@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Tuple, Union
@@ -15,7 +17,6 @@ from data.common import ProblemClass
 from jobs.utils import (
     apply_overrides,
     build_dataloaders,
-    compute_lambda,
     device_from_args,
     init_logging_and_dirs,
     set_all_seeds,
@@ -29,42 +30,66 @@ from models.optimizer import make_optimizer, make_scheduler
 
 class TrainingState:
     def __init__(self, log_every: int) -> None:
-        self.log_every = log_every
+        self.log_every = max(1, int(log_every))
         self.steps: int = 0
         self.trained_items: int = 0
         self.jepa_loss_sum: float = 0.0
         self.jepa_pred_loss_sum: float = 0.0
+        self.jepa_pred_loss_masked_sum: float = 0.0
         self.jepa_sigreg_loss_sum: float = 0.0
-        self.epoch: int = 0
 
     def get_step(self) -> int:
         return self.steps
 
     @property
     def should_log(self) -> bool:
-        return self.steps % max(1, self.log_every) == 0
+        return self.steps % self.log_every == 0
 
     def add_training_step(
-        self, loss: float, loss_pred: float, loss_sigreg: float, num_items: int
+        self,
+        loss: float,
+        loss_pred: float,
+        loss_pred_masked: float,
+        loss_sigreg: float,
+        num_items: int,
     ) -> None:
-        wandb.log({"training/step": self.steps}, step=self.steps)
         self.steps += 1
         self.trained_items += int(num_items)
         self.jepa_loss_sum += loss
         self.jepa_pred_loss_sum += loss_pred
+        self.jepa_pred_loss_masked_sum += loss_pred_masked
         self.jepa_sigreg_loss_sum += loss_sigreg
 
-    def finish_epoch(self) -> Tuple[float, float, float]:
+    def finish_epoch(self) -> Tuple[float, float, float, float]:
         denom = max(1, self.trained_items)
         out = (
             self.jepa_loss_sum / denom,
             self.jepa_pred_loss_sum / denom,
+            self.jepa_pred_loss_masked_sum / denom,
             self.jepa_sigreg_loss_sum / denom,
         )
         self.trained_items = 0
-        self.jepa_loss_sum = self.jepa_pred_loss_sum = self.jepa_sigreg_loss_sum = 0.0
-        self.epoch += 1
+        self.jepa_loss_sum = self.jepa_pred_loss_sum = 0.0
+        self.jepa_pred_loss_masked_sum = self.jepa_sigreg_loss_sum = 0.0
         return out
+
+
+def _compute_lambda_steps(
+    step: int, base: float, start: float | None, warm_steps: int
+) -> float:
+    """Linear ramp of LeJEPA lambda over the first `warm_steps` optimizer steps."""
+    if start is None or warm_steps <= 0:
+        return float(base)
+    if step <= warm_steps:
+        alpha = step / float(max(1, warm_steps))
+        return float(start) * (1.0 - alpha) + float(base) * alpha
+    return float(base)
+
+
+def _cycling_loader(loader):
+    """Yield batches forever, re-shuffling each pass through the dataset."""
+    while True:
+        yield from loader
 
 
 def train(overrides: Optional[Mapping] = None) -> str:
@@ -79,14 +104,14 @@ def train(overrides: Optional[Mapping] = None) -> str:
         t.add_argument("--devices", type=str, default="0")
         t.add_argument("--batch_size", type=int, default=8)
         t.add_argument("--use_bipartite_graphs", action="store_true")
-        t.add_argument("--epochs", type=int, default=20)
+        t.add_argument("--max_steps", type=int, default=10000)
+        t.add_argument("--eval_every_steps", type=int, default=500)
+        t.add_argument("--save_every_steps", type=int, default=500)
         t.add_argument("--lr", type=float, default=1e-3)
         t.add_argument("--num_workers", type=int, default=0)
         t.add_argument("--seed", type=int, default=0)
         t.add_argument("--log_every", type=int, default=50)
-        t.add_argument(
-            "--wandb_project", type=str, default="kkt_gnn_bijepa_for_milp_experiments"
-        )
+        t.add_argument("--wandb_project", type=str, default="pretrain_gnn")
         t.add_argument("--experiments_dir", type=str, default="./experiments")
 
         t.add_argument(
@@ -104,8 +129,8 @@ def train(overrides: Optional[Mapping] = None) -> str:
         t.add_argument(
             "--early_stop_patience",
             type=int,
-            default=1000,
-            help="Stop if valid/lejepa_loss does not improve for this many epochs.",
+            default=5,
+            help="Stop if valid/lejepa_loss does not improve for this many eval rounds.",
         )
         t.add_argument(
             "--early_stop_min_delta",
@@ -120,10 +145,10 @@ def train(overrides: Optional[Mapping] = None) -> str:
             help="If set, linearly ramp LeJEPA λ from this value down/up to --lejepa_lambda.",
         )
         t.add_argument(
-            "--lejepa_lambda_warm_epochs",
+            "--lejepa_lambda_warm_steps",
             type=int,
-            default=10,
-            help="Number of epochs to linearly warm-start λ (ignored if --lejepa_lambda_start is None).",
+            default=1000,
+            help="Number of steps to linearly warm-start λ (ignored if --lejepa_lambda_start is None).",
         )
         # Data
         d = parser.add_argument_group("data")
@@ -221,8 +246,10 @@ def train(overrides: Optional[Mapping] = None) -> str:
         logger.info(f"Trainable params: total={total}, encoder={enc}")
 
         optimizer = make_optimizer(model, args)
-        steps_per_epoch = len(train_loader)
-        scheduler = make_scheduler(optimizer, args, steps_per_epoch)
+        # make_scheduler expects args.epochs and steps_per_epoch;
+        # set epochs=1 so total_steps = max_steps
+        args.epochs = 1
+        scheduler = make_scheduler(optimizer, args, steps_per_epoch=args.max_steps)
 
         training_state = TrainingState(log_every=args.log_every)
 
@@ -232,18 +259,24 @@ def train(overrides: Optional[Mapping] = None) -> str:
         )
 
         best_val = np.inf
+        best_step = 0
+        patience = 0
+
+        train_iter = _cycling_loader(train_loader)
 
         # Train loop
-        for epoch in range(1, args.epochs + 1):
-            current_lambda = compute_lambda(
-                epoch=epoch,
+        for step in range(1, args.max_steps + 1):
+            current_lambda = _compute_lambda_steps(
+                step=step,
                 base=args.lejepa_lambda,
                 start=args.lejepa_lambda_start,
-                warm_epochs=args.lejepa_lambda_warm_epochs,
+                warm_steps=args.lejepa_lambda_warm_steps,
             )
-            train_jepa_loss, train_jepa_pred_loss, train_jepa_sigreg_loss = train_epoch(
+
+            batch = next(train_iter)
+            train_step(
                 model=model,
-                loader=train_loader,
+                batch=batch,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 device=device,
@@ -253,70 +286,87 @@ def train(overrides: Optional[Mapping] = None) -> str:
                 max_grad_norm=args.max_grad_norm,
             )
 
-            val_loss, val_metrics = eval_epoch(
-                model=model,
-                loader=valid_loader,
-                device=device,
-                lejepa_lambda=current_lambda,
-                std_loss_weight=args.lejepa_std_loss_weight,
-            )
+            # Save checkpoint
+            if step % args.save_every_steps == 0 or step == args.max_steps:
+                ckpt = {
+                    "step": step,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "args": vars(args),
+                }
+                torch.save(ckpt, save_dir / "last.pt")
+                # Save encoder-only artifact for downstream B1/B2
+                model.save_encoder(str(save_dir / "last_encoder.pt"))
 
-            log_dict = {
-                "epoch": epoch,
-                "train/lejepa_loss": train_jepa_loss,
-                "train/lejepa_pred_loss": train_jepa_pred_loss,
-                "train/lejepa_sigreg_loss": train_jepa_sigreg_loss,
-                **val_metrics,
-                "lr": optimizer.param_groups[0]["lr"],
-                "lejepa_lambda_used": current_lambda,
-            }
+            # Eval
+            if step % args.eval_every_steps == 0 or step == args.max_steps:
+                val_loss, val_metrics = eval_epoch(
+                    model=model,
+                    loader=valid_loader,
+                    device=device,
+                    lejepa_lambda=current_lambda,
+                    std_loss_weight=args.lejepa_std_loss_weight,
+                )
 
-            wandb.log(log_dict, step=training_state.steps)
+                (
+                    train_jepa_loss,
+                    train_jepa_pred_loss,
+                    train_jepa_pred_loss_masked,
+                    train_jepa_sigreg_loss,
+                ) = training_state.finish_epoch()
 
-            # Save checkpoints
-            ckpt = {
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "args": vars(args),
-            }
-            torch.save(ckpt, save_dir / "last.pt")
-            # Save encoder-only artifact for downstream B1/B2
-            model.save_encoder(str(save_dir / "last_encoder.pt"))
+                log_dict = {
+                    "step": step,
+                    "train/lejepa_loss": train_jepa_loss,
+                    "train/lejepa_pred_loss": train_jepa_pred_loss,
+                    "train/lejepa_pred_loss_masked": train_jepa_pred_loss_masked,
+                    "train/lejepa_sigreg_loss": train_jepa_sigreg_loss,
+                    **val_metrics,
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "lejepa_lambda_used": current_lambda,
+                }
 
-            improved = val_loss < (best_val - args.early_stop_min_delta)
+                wandb.log(log_dict, step=training_state.steps)
 
-            if improved:
-                best_val = float(val_loss)
-                best_epoch = epoch
-                epochs_no_improve = 0
-                torch.save(ckpt, save_dir / "best.pt")
-                model.save_encoder(str(save_dir / "best_encoder.pt"))
-                wandb.run.summary["best_val_loss"] = best_val
-                wandb.run.summary["best_epoch"] = best_epoch
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= args.early_stop_patience:
-                    logger.info(
-                        "Early stopping at epoch {:03d}: no val improvement for {} epochs "
-                        "(best {:.6f} at epoch {:03d})",
-                        epoch,
-                        epochs_no_improve,
-                        best_val,
-                        best_epoch,
-                    )
-                    wandb.run.summary["early_stop"] = True
-                    wandb.run.summary["early_stop_epoch"] = epoch
-                    break
+                improved = val_loss < (best_val - args.early_stop_min_delta)
 
-            logger.info(
-                "Epoch {:03d} | train {:.4f} | valid {:.4f} (best {:.4f} @ {:03d})",
-                epoch,
-                train_jepa_loss,
-                val_loss,
-                best_val,
-                best_epoch,
-            )
+                if improved:
+                    best_val = float(val_loss)
+                    best_step = step
+                    patience = 0
+                    ckpt = {
+                        "step": step,
+                        "model": model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "args": vars(args),
+                    }
+                    torch.save(ckpt, save_dir / "best.pt")
+                    model.save_encoder(str(save_dir / "best_encoder.pt"))
+                    wandb.run.summary["best_val_loss"] = best_val
+                    wandb.run.summary["best_step"] = best_step
+                else:
+                    patience += 1
+                    if patience >= args.early_stop_patience:
+                        logger.info(
+                            "Early stopping at step {:05d}: no val improvement for {} eval rounds "
+                            "(best {:.6f} at step {:05d})",
+                            step,
+                            patience,
+                            best_val,
+                            best_step,
+                        )
+                        wandb.run.summary["early_stop"] = True
+                        wandb.run.summary["early_stop_step"] = step
+                        break
+
+                logger.info(
+                    "Step {:05d} | train {:.4f} | valid {:.4f} (best {:.4f} @ {:05d})",
+                    step,
+                    train_jepa_loss,
+                    val_loss,
+                    best_val,
+                    best_step,
+                )
 
         logger.info(
             "Finished pretraining. Best validation LeJEPA loss = {:.4f}", best_val
@@ -331,9 +381,9 @@ def train(overrides: Optional[Mapping] = None) -> str:
     return str(save_dir)
 
 
-def train_epoch(
+def train_step(
     model: LeJepaEncoderModule,
-    loader: DataLoader,
+    batch,
     optimizer: torch.optim.Optimizer,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     device: str,
@@ -341,57 +391,55 @@ def train_epoch(
     lejepa_lambda: float,
     std_loss_weight: float,
     max_grad_norm: Union[float, None] = None,
-) -> Tuple[float, Optional[float]]:
+) -> None:
     model.train()
-    for batch in loader:
-        base = batch["base"].to(device, non_blocking=True)
+    base = batch["base"].to(device, non_blocking=True)
 
-        global_views, all_views = model.make_lejepa_views(
+    global_views, all_views = model.make_lejepa_views(
+        base,
+    )
+
+    loss, pred_loss, pred_loss_masked, sigreg_loss = model.lejepa_loss(
+        input=base,
+        precomputed_views=(global_views, all_views),
+        lambd=lejepa_lambda,
+        std_loss_weight=std_loss_weight,
+    )
+
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+
+    if max_grad_norm and max_grad_norm > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm))
+
+    optimizer.step()
+
+    if scheduler is not None:
+        scheduler.step()
+
+    training_state.add_training_step(
+        float(loss),
+        float(pred_loss),
+        float(pred_loss_masked),
+        float(sigreg_loss),
+        num_items=getattr(
             base,
+            "num_graphs",
+            getattr(base, "size", lambda: [1])()[0] if hasattr(base, "size") else 1,
+        ),
+    )
+
+    # light, periodic logging only
+    if training_state.should_log:
+        wandb.log(
+            {
+                "train/lejepa_loss_b": float(loss),
+                "train/lejepa_pred_loss_b": float(pred_loss),
+                "train/lejepa_pred_loss_masked_b": float(pred_loss_masked),
+                "train/lejepa_sigreg_loss_b": float(sigreg_loss),
+            },
+            step=training_state.get_step(),
         )
-
-        loss, pred_loss, pred_loss_masked, sigreg_loss = model.lejepa_loss(
-            input=base,
-            precomputed_views=(global_views, all_views),
-            lambd=lejepa_lambda,
-            std_loss_weight=std_loss_weight,
-        )
-
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-
-        if max_grad_norm and max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm))
-
-        optimizer.step()
-
-        if scheduler is not None:
-            scheduler.step()
-
-        training_state.add_training_step(
-            float(loss),
-            float(pred_loss),
-            float(sigreg_loss),
-            num_items=getattr(
-                base,
-                "num_graphs",
-                getattr(base, "size", lambda: [1])()[0] if hasattr(base, "size") else 1,
-            ),
-        )
-
-        # light, periodic logging only
-        if training_state.should_log:
-            wandb.log(
-                {
-                    "train/lejepa_loss_b": float(loss),
-                    "train/lejepa_pred_loss_b": float(pred_loss),
-                    "train/lejepa_pred_loss_masked_b": float(pred_loss_masked),
-                    "train/lejepa_sigreg_loss_b": float(sigreg_loss),
-                },
-                step=training_state.get_step(),
-            )
-
-    return training_state.finish_epoch()
 
 
 @torch.no_grad()

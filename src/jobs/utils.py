@@ -154,10 +154,6 @@ def init_logging_and_dirs(args: Namespace, model: LeJepaEncoderModule) -> Path:
     save_dir = Path(experiments_dir) / project_name / run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    wandb.define_metric("training/step")
-    wandb.define_metric("*", step_metric="training/step")
-    wandb.define_metric("epoch")
-    wandb.define_metric("valid/*", step_metric="epoch")
     return save_dir
 
 

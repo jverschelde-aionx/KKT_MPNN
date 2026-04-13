@@ -1,10 +1,3 @@
-"""
-Decomposition utilities for bipartite MILP graphs.
-===================================================
-Consolidates splitting, extraction, coupling diagnostics, and validation
-logic previously duplicated across job scripts.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -19,6 +12,27 @@ from data.datasets import BipartiteNodeData, right_pad
 
 logger = logging.getLogger(__name__)
 
+from typing import Any, List, Optional, Tuple
+
+from torch import nn
+from torch_geometric.nn import GATv2Conv
+from torch_geometric.utils import to_undirected
+
+from data.split import (
+    SplitInstanceBatch,
+    SplitInstanceData,
+    SplitPartitionData,
+    SplitViewMasks,
+)
+from models.base import LeJepaEncoderModule
+from models.gnn import GNNEncoder, GNNPolicy
+
+"""
+Decomposition utilities for bipartite MILP graphs.
+===================================================
+Consolidates splitting, extraction, coupling diagnostics, and validation
+logic previously duplicated across job scripts.
+"""
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -235,8 +249,12 @@ def build_halo_subgraph(
     n_vars = v_nodes.size(0)
 
     all_cons, all_vars = _bfs_expand_bipartite(
-        part.owned_cons_ids, part.owned_var_ids,
-        edge_index, n_cons, n_vars, halo_hops,
+        part.owned_cons_ids,
+        part.owned_var_ids,
+        edge_index,
+        n_cons,
+        n_vars,
+        halo_hops,
     )
 
     sg = extract_subgraph(all_cons, all_vars, c_nodes, v_nodes, edge_index, edge_attr)
@@ -267,7 +285,12 @@ def build_halo_subgraphs(
     """Build halo subgraphs for all partitions."""
     return [
         build_halo_subgraph(
-            part, c_nodes, v_nodes, edge_index, edge_attr, halo_hops=halo_hops,
+            part,
+            c_nodes,
+            v_nodes,
+            edge_index,
+            edge_attr,
+            halo_hops=halo_hops,
         )
         for part in specs
     ]
@@ -386,30 +409,59 @@ def split_bipartite_graph_metis(
     _, membership = pymetis.part_graph(num_parts, adjacency=adjacency)
     membership = torch.tensor(membership, dtype=torch.long)
 
-    specs: List[PartitionSpec] = []
+    # First pass: collect raw METIS assignments per partition.
+    raw_cons: List[torch.Tensor] = []
+    raw_vars: List[torch.Tensor] = []
     for part in range(num_parts):
         part_nodes = (membership == part).nonzero(as_tuple=False).view(-1)
-        cons_ids = part_nodes[part_nodes < n_cons]
-        var_ids = part_nodes[part_nodes >= n_cons] - n_cons
+        raw_cons.append(part_nodes[part_nodes < n_cons])
+        raw_vars.append(part_nodes[part_nodes >= n_cons] - n_cons)
 
-        # Fallback: if one side is empty, induce from the other (vectorised)
-        if cons_ids.numel() == 0 and var_ids.numel() > 0:
-            v_mask = torch.zeros(n_vars, dtype=torch.bool)
-            v_mask[var_ids] = True
-            cons_ids = edge_index[0][v_mask[edge_index[1]]].unique()
-        elif var_ids.numel() == 0 and cons_ids.numel() > 0:
-            c_mask = torch.zeros(n_cons, dtype=torch.bool)
-            c_mask[cons_ids] = True
-            var_ids = edge_index[1][c_mask[edge_index[0]]].unique()
+    # Second pass: merge single-sided partitions into the neighbour partition
+    # that owns the most of their adjacent nodes on the missing side.
+    for part in range(num_parts):
+        cons_ids = raw_cons[part]
+        var_ids = raw_vars[part]
+        if cons_ids.numel() > 0 and var_ids.numel() > 0:
+            continue  # both sides present, nothing to merge
+        if cons_ids.numel() == 0 and var_ids.numel() == 0:
+            continue  # empty partition
 
+        # Find the partition that owns most of the neighbours on the missing side.
+        nodes = cons_ids if cons_ids.numel() > 0 else (var_ids + n_cons)
+        # Gather neighbour nodes from adjacency
+        nbr_ids = []
+        for n_id in nodes.tolist():
+            nbr_ids.extend(adjacency[n_id])
+        if not nbr_ids:
+            continue
+        nbr_parts = membership[torch.tensor(nbr_ids, dtype=torch.long)]
+        # Pick the most frequent neighbouring partition (excluding self)
+        counts = torch.zeros(num_parts, dtype=torch.long)
+        for p in nbr_parts.tolist():
+            if p != part:
+                counts[p] += 1
+        target = int(counts.argmax())
+        if counts[target] == 0:
+            continue  # all neighbours in same partition — skip
+
+        # Merge: donate our nodes to the target partition
+        raw_cons[target] = torch.cat([raw_cons[target], cons_ids])
+        raw_vars[target] = torch.cat([raw_vars[target], var_ids])
+        raw_cons[part] = torch.tensor([], dtype=torch.long)
+        raw_vars[part] = torch.tensor([], dtype=torch.long)
+
+    specs: List[PartitionSpec] = []
+    for part in range(num_parts):
+        cons_ids = raw_cons[part]
+        var_ids = raw_vars[part]
         if cons_ids.numel() == 0 or var_ids.numel() == 0:
             continue
-
         specs.append(
             PartitionSpec(
                 part_id=part,
-                owned_cons_ids=cons_ids.sort().values,
-                owned_var_ids=var_ids.sort().values,
+                owned_cons_ids=cons_ids.unique().sort().values,
+                owned_var_ids=var_ids.unique().sort().values,
             )
         )
 
@@ -462,7 +514,10 @@ def compute_coupling_diagnostics(
         for k, sg in enumerate(subgraphs)
     ]
     return compute_coupling_diagnostics_from_specs(
-        specs, n_cons, n_vars, edge_index,
+        specs,
+        n_cons,
+        n_vars,
+        edge_index,
     )
 
 
@@ -722,8 +777,10 @@ def compute_block_features(
                 n_total_c = sg.constraint_features.size(0)
                 n_total_v = sg.variable_features.size(0)
                 exp_ratio = compute_halo_expansion_ratio(
-                    int(n_oc), int(n_ov),
-                    n_total_c - int(n_oc), n_total_v - int(n_ov),
+                    int(n_oc),
+                    int(n_ov),
+                    n_total_c - int(n_oc),
+                    n_total_v - int(n_ov),
                 )
             else:
                 exp_ratio = 1.0
@@ -749,8 +806,12 @@ def log_block_graph_diagnostics(bg: BlockGraph) -> None:
     n_edges = bg.block_edge_index.size(1)
     avg_deg = 2.0 * n_edges / max(bg.n_blocks, 1)
 
-    logger.info("Block graph: %d nodes, %d edges, avg degree %.2f",
-                bg.n_blocks, n_edges, avg_deg)
+    logger.info(
+        "Block graph: %d nodes, %d edges, avg degree %.2f",
+        bg.n_blocks,
+        n_edges,
+        avg_deg,
+    )
 
     if n_edges > 0:
         attr = bg.block_edge_attr  # [E, 4]
@@ -759,7 +820,10 @@ def log_block_graph_diagnostics(bg: BlockGraph) -> None:
             col = attr[:, j]
             logger.info(
                 "  %s: min=%.2f  max=%.2f  mean=%.2f",
-                name, col.min().item(), col.max().item(), col.mean().item(),
+                name,
+                col.min().item(),
+                col.max().item(),
+                col.mean().item(),
             )
 
     if bg.block_features is not None:
@@ -867,13 +931,16 @@ def compute_boundary_features(
     cons_cut_frac = cons_cross_deg / cons_total_deg.clamp(min=1.0)
     cons_is_bnd = (cons_cross_deg > 0).float()
 
-    cons_boundary = torch.stack([
-        cons_total_deg.log1p(),
-        cons_cross_deg.log1p(),
-        cons_cut_frac,
-        cons_abs_coeff.log1p(),
-        cons_is_bnd,
-    ], dim=1)  # [n_cons, 5]
+    cons_boundary = torch.stack(
+        [
+            cons_total_deg.log1p(),
+            cons_cross_deg.log1p(),
+            cons_cut_frac,
+            cons_abs_coeff.log1p(),
+            cons_is_bnd,
+        ],
+        dim=1,
+    )  # [n_cons, 5]
 
     # --- Variable nodes ---
     vars_total_deg = torch.zeros(n_vars)
@@ -888,13 +955,16 @@ def compute_boundary_features(
     vars_cut_frac = vars_cross_deg / vars_total_deg.clamp(min=1.0)
     vars_is_bnd = (vars_cross_deg > 0).float()
 
-    vars_boundary = torch.stack([
-        vars_total_deg.log1p(),
-        vars_cross_deg.log1p(),
-        vars_cut_frac,
-        vars_abs_coeff.log1p(),
-        vars_is_bnd,
-    ], dim=1)  # [n_vars, 5]
+    vars_boundary = torch.stack(
+        [
+            vars_total_deg.log1p(),
+            vars_cross_deg.log1p(),
+            vars_cut_frac,
+            vars_abs_coeff.log1p(),
+            vars_is_bnd,
+        ],
+        dim=1,
+    )  # [n_vars, 5]
 
     return cons_boundary, vars_boundary
 
@@ -954,3 +1024,700 @@ def validate_partition(
                 f"Partition {s.part_id} is empty "
                 f"(cons={s.owned_cons_ids.numel()}, vars={s.owned_var_ids.numel()})"
             )
+
+
+class BlockGNN(nn.Module):
+    """
+    Small block-level GNN over the partition graph.
+
+    block_features: [K, d_block]
+    block_edge_index: [2, E_block]
+    block_edge_attr: [E_block, d_edge]
+    """
+
+    def __init__(
+        self,
+        *,
+        d_block: int,
+        d_hidden: int = 128,
+        d_z: int = 128,
+        d_edge: int = 4,
+        heads: int = 4,
+        dropout: float = 0.05,
+    ) -> None:
+        super().__init__()
+        if d_hidden % heads != 0:
+            raise ValueError(f"d_hidden={d_hidden} must be divisible by heads={heads}")
+
+        self.input_proj = nn.Sequential(
+            nn.LayerNorm(d_block),
+            nn.Linear(d_block, d_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.edge_proj = nn.Sequential(
+            nn.Linear(d_edge, d_hidden),
+            nn.ReLU(),
+        )
+
+        self.conv1 = GATv2Conv(
+            in_channels=d_hidden,
+            out_channels=d_hidden // heads,
+            heads=heads,
+            concat=True,
+            edge_dim=d_hidden,
+            dropout=dropout,
+            add_self_loops=False,
+        )
+        self.conv2 = GATv2Conv(
+            in_channels=d_hidden,
+            out_channels=d_hidden // heads,
+            heads=heads,
+            concat=True,
+            edge_dim=d_hidden,
+            dropout=dropout,
+            add_self_loops=False,
+        )
+
+        self.norm1 = nn.LayerNorm(d_hidden)
+        self.norm2 = nn.LayerNorm(d_hidden)
+
+        self.output_proj = nn.Sequential(
+            nn.Linear(d_hidden, d_z),
+            nn.ReLU(),
+            nn.Linear(d_z, d_z),
+        )
+
+    def forward(
+        self,
+        block_features: torch.Tensor,
+        block_edge_index: torch.Tensor,
+        block_edge_attr: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Returns z_blocks: [K, d_z]
+        """
+        x = self.input_proj(block_features)
+
+        if block_edge_index.numel() == 0:
+            return self.output_proj(x)
+
+        # Make undirected explicitly
+        ei, ea = to_undirected(block_edge_index, block_edge_attr, reduce="mean")
+        ea = self.edge_proj(ea)
+
+        h = self.conv1(x, ei, ea)
+        h = self.norm1(h + x)
+
+        h2 = self.conv2(h, ei, ea)
+        h = self.norm2(h2 + h)
+
+        return self.output_proj(h)
+
+
+class ComposerMLP(nn.Module):
+    """
+    Per-node composer head:
+      [h_sub ; z_block ; boundary_feat] -> h_hat
+    """
+
+    def __init__(
+        self,
+        *,
+        d_sub: int,
+        d_z: int,
+        d_boundary: int,
+        d_out: int,
+        d_hidden: int = 256,
+        dropout: float = 0.05,
+    ) -> None:
+        super().__init__()
+        d_in = d_sub + d_z + d_boundary
+
+        self.net = nn.Sequential(
+            nn.Linear(d_in, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_hidden, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_hidden, d_out),
+        )
+
+    def forward(
+        self,
+        h_sub: torch.Tensor,
+        z_block: torch.Tensor,
+        boundary_feat: torch.Tensor,
+    ) -> torch.Tensor:
+        x = torch.cat([h_sub, z_block, boundary_feat], dim=-1)
+        return self.net(x)
+
+
+class BlockGNNComposer(nn.Module):
+    """
+    Supports three modes:
+      - local MLP only: use_block_context=False, use_block_gnn=False
+      - pooled block context: use_block_context=True, use_block_gnn=False
+      - block GNN composer: use_block_context=True, use_block_gnn=True
+    """
+
+    def __init__(
+        self,
+        *,
+        d_sub: int,
+        d_block: int,
+        d_z: int,
+        d_boundary: int,
+        d_mlp_hidden: int = 256,
+        heads: int = 4,
+        dropout: float = 0.05,
+        use_block_context: bool = True,
+        use_block_gnn: bool = True,
+        d_edge: int = 4,
+    ) -> None:
+        super().__init__()
+
+        self.use_block_context = use_block_context
+        self.use_block_gnn = use_block_gnn
+        self.d_z = d_z
+
+        self.context_proj = None
+        self.block_gnn = None
+
+        if self.use_block_context and not self.use_block_gnn:
+            self.context_proj = nn.Sequential(
+                nn.LayerNorm(d_block),
+                nn.Linear(d_block, d_z),
+                nn.ReLU(),
+                nn.Linear(d_z, d_z),
+            )
+
+        if self.use_block_context and self.use_block_gnn:
+            self.block_gnn = BlockGNN(
+                d_block=d_block,
+                d_hidden=max(d_z, 128),
+                d_z=d_z,
+                d_edge=d_edge,
+                heads=heads,
+                dropout=dropout,
+            )
+
+        self.cons_composer = ComposerMLP(
+            d_sub=d_sub,
+            d_z=d_z,
+            d_boundary=d_boundary,
+            d_out=d_sub,
+            d_hidden=d_mlp_hidden,
+            dropout=dropout,
+        )
+        self.var_composer = ComposerMLP(
+            d_sub=d_sub,
+            d_z=d_z,
+            d_boundary=d_boundary,
+            d_out=d_sub,
+            d_hidden=d_mlp_hidden,
+            dropout=dropout,
+        )
+
+    def _block_context(
+        self,
+        block_features: torch.Tensor,
+        block_edge_index: torch.Tensor,
+        block_edge_attr: torch.Tensor,
+    ) -> torch.Tensor:
+        K = block_features.size(0)
+        dev = block_features.device
+
+        if not self.use_block_context:
+            return torch.zeros((K, self.d_z), device=dev, dtype=block_features.dtype)
+
+        if self.use_block_gnn:
+            return self.block_gnn(block_features, block_edge_index, block_edge_attr)
+
+        return self.context_proj(block_features)
+
+    def forward(
+        self,
+        *,
+        block_features: torch.Tensor,  # [K, d_block]
+        block_edge_index: torch.Tensor,  # [2, E_block]
+        block_edge_attr: torch.Tensor,  # [E_block, d_edge]
+        cons_block_id: torch.Tensor,  # [n_cons]
+        vars_block_id: torch.Tensor,  # [n_vars]
+        c_sub: torch.Tensor,  # [n_cons, d_sub]
+        v_sub: torch.Tensor,  # [n_vars, d_sub]
+        cons_boundary_feat: torch.Tensor,  # [n_cons, d_boundary]
+        vars_boundary_feat: torch.Tensor,  # [n_vars, d_boundary]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        z_blocks = self._block_context(
+            block_features, block_edge_index, block_edge_attr
+        )
+
+        c_ctx = z_blocks[cons_block_id]
+        v_ctx = z_blocks[vars_block_id]
+
+        c_hat = self.cons_composer(c_sub, c_ctx, cons_boundary_feat)
+        v_hat = self.var_composer(v_sub, v_ctx, vars_boundary_feat)
+        return c_hat, v_hat
+
+
+class SplitBlockBiJepaPolicy(LeJepaEncoderModule):
+    """
+    Self-contained split architecture:
+      - input is already pre-split into halo subgraphs + block graph
+      - no full graph is needed during training/inference
+      - BIJEPA is applied to composed node embeddings
+    """
+
+    @staticmethod
+    def add_args(parser):
+        GNNPolicy.add_args(parser)
+
+        group = parser.add_argument_group("split_bijepa")
+        group.add_argument("--num_blocks", type=int, default=5)
+        group.add_argument("--halo_hops", type=int, default=0)
+        group.add_argument("--composer_d_z", type=int, default=128)
+        group.add_argument("--composer_hidden", type=int, default=256)
+        group.add_argument("--composer_heads", type=int, default=4)
+        group.add_argument("--composer_dropout", type=float, default=0.05)
+        group.add_argument("--use_block_context", type=int, default=1)
+        group.add_argument("--use_block_gnn", type=int, default=1)
+        group.add_argument("--skip_composer", type=int, default=0,
+                           help="Skip composer entirely (raw split baseline). 1=skip, 0=use composer.")
+
+    @staticmethod
+    def name(args):
+        name = "split_block_bijepa"
+        name += f"-dim={args.embedding_size}"
+        name += f"-blocks={args.num_blocks}"
+        name += f"-halo={args.halo_hops}"
+        name += f"-dz={args.composer_d_z}"
+        name += f"-ctx={args.use_block_context}"
+        name += f"-bg={args.use_block_gnn}"
+        name += f"-lmask={args.lejepa_local_mask}"
+        name += f"-gmask={args.lejepa_global_mask}"
+        return name
+
+    def __init__(self, args):
+        super().__init__(args.sigreg_slices, args.sigreg_points)
+
+        # JEPA view config
+        self.n_global_views = args.lejepa_n_global_views
+        self.n_local_views = args.lejepa_n_local_views
+        self.local_mask = args.lejepa_local_mask
+        self.global_mask = args.lejepa_global_mask
+        self.local_edge_mask = getattr(args, "lejepa_local_edge_mask", 0.20)
+        self.global_edge_mask = getattr(args, "lejepa_global_edge_mask", 0.05)
+
+        # shared subgraph encoder
+        self._encoder = GNNEncoder(
+            cons_nfeats=args.cons_nfeats,
+            var_nfeats=args.var_nfeats,
+            edge_nfeats=args.edge_nfeats,
+            embedding_size=args.embedding_size,
+            num_emb_type=args.num_emb_type,
+            num_emb_freqs=args.num_emb_freqs,
+            num_emb_bins=args.num_emb_bins,
+            lejepa_embed_dim=args.lejepa_embed_dim,
+            dropout=args.dropout,
+            bipartite_conv=args.bipartite_conv,
+            attn_heads=args.attn_heads,
+        )
+        self.d_sub = args.embedding_size
+
+        # composer
+        self.skip_composer = bool(getattr(args, "skip_composer", 0))
+        self.composer = BlockGNNComposer(
+            d_sub=self.d_sub,
+            d_block=4 * self.d_sub,
+            d_z=args.composer_d_z,
+            d_boundary=5,
+            d_mlp_hidden=args.composer_hidden,
+            heads=args.composer_heads,
+            dropout=args.composer_dropout,
+            use_block_context=bool(args.use_block_context),
+            use_block_gnn=bool(args.use_block_gnn),
+            d_edge=4,  # assumes build_block_graph returns 4 edge features
+        )
+
+        # heads for later fine-tuning
+        d_out = self.d_sub
+        self.var_head = nn.Sequential(
+            nn.Linear(d_out, d_out), nn.ReLU(), nn.Linear(d_out, 1, bias=False)
+        )
+        self.cons_head = nn.Sequential(
+            nn.Linear(d_out, d_out), nn.ReLU(), nn.Linear(d_out, 1, bias=False)
+        )
+        self.lambda_act = nn.Softplus()
+
+    @property
+    def encoder(self) -> GNNEncoder:
+        return self._encoder
+
+    @encoder.setter
+    def encoder(self, module):
+        self._encoder = module
+
+    # ------------------------------------------------------------
+    # internal helpers
+    # ------------------------------------------------------------
+
+    def _encode_block_slot_batched(
+        self,
+        instances: List[SplitInstanceData],
+        k: int,
+        device: torch.device,
+        block_masks: Optional[List[tuple]] = None,
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Batch all block-k subgraphs across instances and encode in one forward pass.
+        block_masks: optional list of (cons_mask, var_mask, edge_mask) per instance.
+        Returns per-instance (c_emb, v_emb) pairs.
+        """
+        c_features_list = []
+        v_features_list = []
+        edge_index_list = []
+        edge_attr_list = []
+        c_mask_list = []
+        v_mask_list = []
+        e_mask_list = []
+        c_counts = []
+        v_counts = []
+
+        c_offset = 0
+        v_offset = 0
+        for idx, inst in enumerate(instances):
+            g = inst.partitions[k].graph
+            nc = g.constraint_features.size(0)
+            nv = g.variable_features.size(0)
+
+            c_features_list.append(g.constraint_features)
+            v_features_list.append(g.variable_features)
+            ei = g.edge_index.clone()
+            ei[0] += c_offset
+            ei[1] += v_offset
+            edge_index_list.append(ei)
+            edge_attr_list.append(g.edge_attr)
+
+            if block_masks is not None:
+                cm, vm, em = block_masks[idx]
+                c_mask_list.append(cm)
+                v_mask_list.append(vm)
+                e_mask_list.append(em)
+
+            c_counts.append(nc)
+            v_counts.append(nv)
+            c_offset += nc
+            v_offset += nv
+
+        c_all = torch.cat(c_features_list, dim=0).to(device)
+        v_all = torch.cat(v_features_list, dim=0).to(device)
+        ei_all = torch.cat(edge_index_list, dim=1).to(device)
+        ea_all = torch.cat(edge_attr_list, dim=0).to(device)
+
+        if block_masks is not None:
+            cm_all = torch.cat(c_mask_list, dim=0).to(device)
+            vm_all = torch.cat(v_mask_list, dim=0).to(device)
+            em_all = torch.cat(e_mask_list, dim=0).to(device)
+        else:
+            cm_all = None
+            vm_all = None
+            em_all = None
+
+        c_enc, v_enc = self.encoder.encode_nodes(
+            c_all, ei_all, ea_all, v_all,
+            cons_mask=cm_all, var_mask=vm_all, edge_mask=em_all,
+        )
+
+        # unbatch
+        results = []
+        c_pos = 0
+        v_pos = 0
+        for nc, nv in zip(c_counts, v_counts):
+            results.append((c_enc[c_pos : c_pos + nc], v_enc[v_pos : v_pos + nv]))
+            c_pos += nc
+            v_pos += nv
+        return results
+
+    def _scatter_owned_batched(
+        self,
+        instances: List[SplitInstanceData],
+        all_partition_embs: List[List[Tuple[torch.Tensor, torch.Tensor]]],
+        device: torch.device,
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Scatter owned embeddings back to global node positions for each instance.
+        all_partition_embs[k][i] = (c_emb, v_emb) for block k, instance i.
+        """
+        results = []
+        K = len(all_partition_embs)
+
+        for i, inst in enumerate(instances):
+            c_global = torch.zeros((inst.n_cons, self.d_sub), device=device)
+            v_global = torch.zeros((inst.n_vars, self.d_sub), device=device)
+
+            for k in range(K):
+                part = inst.partitions[k]
+                c_loc, v_loc = all_partition_embs[k][i]
+
+                owned_c_local = part.owned_cons_local.to(device)
+                owned_v_local = part.owned_var_local.to(device)
+                c_owned = c_loc[owned_c_local]
+                v_owned = v_loc[owned_v_local]
+
+                c_global.index_copy_(
+                    0, part.orig_cons_ids[part.owned_cons_local].to(device), c_owned
+                )
+                v_global.index_copy_(
+                    0, part.orig_var_ids[part.owned_var_local].to(device), v_owned
+                )
+            results.append((c_global, v_global))
+        return results
+
+    def _pool_block_features(
+        self,
+        c_sub: torch.Tensor,
+        v_sub: torch.Tensor,
+        cons_block_id: torch.Tensor,
+        vars_block_id: torch.Tensor,
+        K: int,
+    ) -> torch.Tensor:
+        d = self.d_sub
+        dev = c_sub.device
+
+        # scatter_mean / scatter_max via index
+        c_block = cons_block_id.unsqueeze(1).expand(-1, d)  # [n_cons, d]
+        v_block = vars_block_id.unsqueeze(1).expand(-1, d)  # [n_vars, d]
+
+        c_mean = torch.zeros(K, d, device=dev).scatter_reduce(0, c_block, c_sub, reduce="mean", include_self=False)
+        c_max = torch.full((K, d), float("-inf"), device=dev).scatter_reduce(0, c_block, c_sub, reduce="amax", include_self=False)
+        c_max = c_max.clamp(min=0.0)  # empty blocks -> 0
+
+        v_mean = torch.zeros(K, d, device=dev).scatter_reduce(0, v_block, v_sub, reduce="mean", include_self=False)
+        v_max = torch.full((K, d), float("-inf"), device=dev).scatter_reduce(0, v_block, v_sub, reduce="amax", include_self=False)
+        v_max = v_max.clamp(min=0.0)  # empty blocks -> 0
+
+        return torch.cat([v_mean, v_max, c_mean, c_max], dim=1)  # [K, 4*d]
+
+    def _compose_instances(
+        self,
+        instances: List[SplitInstanceData],
+        device: torch.device,
+        view_masks: Optional[SplitViewMasks] = None,
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Block-wise batched encoding + per-instance composition.
+        Encoder forwards = K (one per block slot), not K × B.
+        Requires all instances to have the same number of blocks.
+        """
+        block_counts = {inst.num_blocks for inst in instances}
+        if len(block_counts) != 1:
+            raise ValueError(
+                f"Block-wise batching requires uniform num_blocks, "
+                f"but batch contains {block_counts}. "
+                f"Use fixed --num_blocks in precompute_splits or bucket by block count."
+            )
+        K = block_counts.pop()
+
+        # Phase 1: block-wise batched encoding
+        # all_partition_embs[k][i] = (c_emb, v_emb)
+        all_partition_embs = []
+        for k in range(K):
+            block_masks = view_masks.masks[k] if view_masks is not None else None
+            block_embs = self._encode_block_slot_batched(
+                instances, k, device, block_masks=block_masks,
+            )
+            all_partition_embs.append(block_embs)
+
+        # Phase 2: scatter owned embeddings per instance
+        per_inst_sub = self._scatter_owned_batched(
+            instances, all_partition_embs, device
+        )
+
+        if self.skip_composer:
+            return per_inst_sub
+
+        # Phase 3: composer per instance (cheap, no encoder)
+        results = []
+        for i, inst in enumerate(instances):
+            c_sub, v_sub = per_inst_sub[i]
+            cons_block_id = inst.cons_block_id.to(device)
+            vars_block_id = inst.vars_block_id.to(device)
+
+            block_features = self._pool_block_features(
+                c_sub, v_sub, cons_block_id, vars_block_id, K
+            )
+
+            c_hat, v_hat = self.composer(
+                block_features=block_features,
+                block_edge_index=inst.block_edge_index.to(device),
+                block_edge_attr=inst.block_edge_attr.to(device),
+                cons_block_id=cons_block_id,
+                vars_block_id=vars_block_id,
+                c_sub=c_sub,
+                v_sub=v_sub,
+                cons_boundary_feat=inst.cons_boundary_feat.to(device),
+                vars_boundary_feat=inst.vars_boundary_feat.to(device),
+            )
+            results.append((c_hat, v_hat))
+        return results
+
+    # ------------------------------------------------------------
+    # BIJEPA interface
+    # ------------------------------------------------------------
+
+    def embed(
+        self,
+        inputs: List[Any],
+        view_masks_list: Optional[List[Optional[SplitViewMasks]]] = None,
+    ) -> Tuple[torch.Tensor]:
+        device = next(self.parameters()).device
+        outs = []
+
+        for idx, item in enumerate(inputs):
+            if isinstance(item, SplitInstanceBatch):
+                instances = item.instances
+            elif isinstance(item, SplitInstanceData):
+                instances = [item]
+            else:
+                raise TypeError(
+                    f"Expected SplitInstanceBatch or SplitInstanceData, got {type(item)}"
+                )
+
+            vm = view_masks_list[idx] if view_masks_list is not None else None
+            composed = self._compose_instances(instances, device, view_masks=vm)
+            c_cat = torch.cat([c for c, _ in composed], dim=0)
+            v_cat = torch.cat([v for _, v in composed], dim=0)
+            outs.append(torch.cat([c_cat, v_cat], dim=0))
+
+        return tuple(outs)
+
+    def lejepa_pred_loss(self, all_embeddings, global_embeddings, all_views):
+        centers = torch.stack(global_embeddings, 0).mean(0)        # [N, D]
+        all_emb = torch.stack(all_embeddings, 0)                   # [V, N, D]
+        pred_loss = (all_emb - centers.unsqueeze(0)).pow(2).mean()  # scalar
+        return pred_loss, pred_loss
+
+    def lejepa_loss(
+        self,
+        input,
+        precomputed_views: Tuple[List[SplitViewMasks], List[SplitViewMasks]],
+        lambd: float,
+        std_loss_weight=0.0,
+    ):
+        """
+        Override: embed all views once using the original batch + lightweight masks.
+        No graph cloning, no re-embedding globals.
+        """
+        global_view_masks, all_view_masks = precomputed_views
+        n_global = len(global_view_masks)
+
+        if isinstance(input, SplitInstanceBatch):
+            instances = input.instances
+        else:
+            instances = [input]
+
+        # embed each view = same instances + different masks
+        # reuse the batch object for all views, only masks differ
+        inputs_repeated = [input] * len(all_view_masks)
+        all_embeddings = self.embed(inputs_repeated, view_masks_list=all_view_masks)
+        global_embeddings = all_embeddings[:n_global]
+
+        if self.training:
+            jitter = 1e-3
+            embeddings_for_reg = [
+                emb + jitter * torch.randn_like(emb) for emb in all_embeddings
+            ]
+        else:
+            embeddings_for_reg = all_embeddings
+
+        z_cat = torch.cat(all_embeddings, dim=0)
+        std = z_cat.std(dim=0, unbiased=False).clamp_min(1e-6)
+        std_loss = torch.nn.functional.relu(1.0 - std).mean()
+
+        pred_loss, pred_loss_masked = self.lejepa_pred_loss(
+            all_embeddings, global_embeddings, all_view_masks
+        )
+
+        sigreg_loss = torch.stack([self.sigreg(z) for z in embeddings_for_reg]).mean()
+
+        loss = (1 - lambd) * pred_loss + lambd * sigreg_loss + std_loss_weight * std_loss
+        return loss, pred_loss, pred_loss_masked, sigreg_loss
+
+    @staticmethod
+    def _generate_view_masks(
+        instances: List[SplitInstanceData],
+        cons_mask_rate: float,
+        var_mask_rate: float,
+        edge_mask_rate: float,
+    ) -> SplitViewMasks:
+        """Generate lightweight boolean masks per block slot, no graph cloning."""
+        K = instances[0].num_blocks
+        masks = []  # [K][B] of (cons_mask, var_mask, edge_mask)
+        for k in range(K):
+            block_masks = []
+            for inst in instances:
+                g = inst.partitions[k].graph
+                nc = g.constraint_features.size(0)
+                nv = g.variable_features.size(0)
+                ne = g.edge_index.size(1)
+                cm = torch.rand(nc) < cons_mask_rate
+                vm = torch.rand(nv) < var_mask_rate
+                em = torch.rand(ne) < edge_mask_rate
+                block_masks.append((cm, vm, em))
+            masks.append(block_masks)
+        return SplitViewMasks(masks=masks)
+
+    def make_lejepa_views(
+        self,
+        input: SplitInstanceBatch,
+        n_global_views: int | None = None,
+        n_local_views: int | None = None,
+        local_mask: float | None = None,
+        global_mask: float | None = None,
+    ):
+        if not isinstance(input, SplitInstanceBatch):
+            raise TypeError(f"Expected SplitInstanceBatch, got {type(input)}")
+
+        n_global_views = (
+            self.n_global_views if n_global_views is None else n_global_views
+        )
+        n_local_views = self.n_local_views if n_local_views is None else n_local_views
+        local_mask = self.local_mask if local_mask is None else local_mask
+        global_mask = self.global_mask if global_mask is None else global_mask
+
+        instances = input.instances
+
+        global_view_masks = [
+            self._generate_view_masks(
+                instances, global_mask, global_mask, self.global_edge_mask
+            )
+            for _ in range(n_global_views)
+        ]
+
+        local_view_masks = [
+            self._generate_view_masks(
+                instances, local_mask, local_mask, self.local_edge_mask
+            )
+            for _ in range(n_local_views)
+        ]
+
+        all_view_masks = global_view_masks + local_view_masks
+        return global_view_masks, all_view_masks
+
+    # ------------------------------------------------------------
+    # Later downstream use
+    # ------------------------------------------------------------
+
+    def predict_instance(
+        self, inst: SplitInstanceData
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        device = next(self.parameters()).device
+        composed = self._compose_instances([inst], device)
+        c_hat, v_hat = composed[0]
+        x = self.var_head(v_hat).squeeze(-1)
+        lam = self.lambda_act(self.cons_head(c_hat).squeeze(-1))
+        return x, lam

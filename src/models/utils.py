@@ -11,13 +11,13 @@ from models.policy_encoder import BipartiteNodeData
 def get_dual_feasibility_violation(
     A_i: torch.Tensor, lambda_i: torch.Tensor, c_i: torch.Tensor
 ) -> Tuple[float, float]:
+    """Stationarity residual: c + A^T lambda should be 0 for optimality."""
     lam_plus = torch.relu(lambda_i)
     if A_i.is_sparse:
-        v = torch.sparse.mm(A_i.transpose(0, 1), lam_plus.unsqueeze(1)).squeeze(1) - c_i
+        v = c_i + torch.sparse.mm(A_i.transpose(0, 1), lam_plus.unsqueeze(1)).squeeze(1)
     else:
-        v = A_i.transpose(0, 1).matmul(lam_plus) - c_i
-    v_pos = v.clamp_min(0.0)
-    return float(v_pos.pow(2).mean().sqrt().item()), float(v_pos.abs().max().item())
+        v = c_i + A_i.transpose(0, 1).matmul(lam_plus)
+    return float(v.pow(2).mean().sqrt().item()), float(v.abs().max().item())
 
 
 def get_optimality_gap(

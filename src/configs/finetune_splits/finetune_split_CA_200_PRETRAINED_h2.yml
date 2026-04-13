@@ -1,0 +1,84 @@
+# ── Data ─────────────────────────────────────────────────────────
+problems: ["CA"]
+is_sizes: [200]
+ca_sizes: [100]
+sc_sizes: [200]
+cfl_sizes: [200]
+rnd_sizes: [200]
+data_root: ./data/instances/milp/finetune
+val_split: 0.15
+
+# ── GNN encoder (must match pretrain_split config) ──────────────
+embedding_size: 128
+cons_nfeats: 9
+edge_nfeats: 1
+var_nfeats: 18
+num_emb_type: periodic
+num_emb_bins: 32
+num_emb_freqs: 16
+lejepa_embed_dim: 128
+bipartite_conv: gatv2
+attn_heads: 4
+dropout: 0.05
+
+# ── LeJEPA / SigReg (must match pretrain_split config) ──────────
+lejepa_n_global_views: 2
+lejepa_n_local_views: 8
+lejepa_local_mask: 0.6
+lejepa_global_mask: 0.05
+lejepa_local_edge_mask: 0.05
+lejepa_global_edge_mask: 0.6
+lejepa_lambda: 0.256
+lejepa_std_loss_weight: 0.0
+sigreg_slices: 512
+sigreg_points: 13
+
+# ── Split / Composer ────────────────────────────────────────────
+num_blocks: 5
+halo_hops: 2
+composer_d_z: 128
+composer_hidden: 256
+composer_heads: 4
+composer_dropout: 0.05
+use_block_context: 1
+use_block_gnn: 1
+skip_composer: 0
+
+# ── Pretrained weights ──────────────────────────────────────────
+# TODO: update path once halo=2 pretraining is complete
+# pretrain_checkpoint: /home/joachim-verschelde/Repos/KKT_MPNN/src/experiments/split_bijepa_pretraining/run_..._halo=2_.../best.pt
+finetune_mode: full
+unfreeze_step: 0
+
+# ── KKT loss weights ────────────────────────────────────────────
+primal_weight: 0.1
+dual_weight: 0.1
+stationarity_weight: 0.6
+complementary_slackness_weight: 0.2
+
+# ── Surrogate loss ──────────────────────────────────────────────
+use_surrogate: true
+surrogate_alpha: 10.0
+surrogate_delta: 1.0
+surrogate_beta_final: 0.1
+surrogate_warmup_frac: 0.3
+
+# ── Training ─────────────────────────────────────────────────────
+batch_size: 32
+max_steps: 5000
+eval_every_steps: 500
+save_every_steps: 500
+lr: 0.001
+encoder_lr: 0.0001
+optimizer: adam
+weight_decay: 0.0
+scheduler: cosine_warmup
+warmup_pct: 0.05
+min_lr_ratio: 0.1
+max_grad_norm: 1.0
+num_workers: 0
+log_every: 10
+seed: 42
+devices: "0"
+wandb_project: split_bijepa_finetuning
+experiments_dir: ./experiments

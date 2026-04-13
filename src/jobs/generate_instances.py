@@ -26,7 +26,7 @@ def generate() -> None:
         "--configs",
         is_config_file=True,
         required=False,
-        default="configs/generate_instances_milp.yml",
+        default="configs/data_generation/generate_instances_milp.yml",
     )
 
     # Data
