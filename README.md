@@ -1,6 +1,8 @@
-# BIJEPA
+# BIJEPA: Label-Free Representation Learning and Decomposition for Linear Programs on Bipartite Graphs
 
 Code for the MSc thesis *BIJEPA: Label-Free Representation Learning and Decomposition for Linear Programs on Bipartite Graphs* (Joachim Verschelde, Open University, 2026).
+
+![BiJEPA pretraining → KKT finetuning overview](docs/bijepa_overview.png)
 
 This README is a reproducibility guide. For the research context, see the thesis.
 
