@@ -1,272 +1,204 @@
-# KKT_MPNN
+# BIJEPA
 
-## Installation and Setup
+Code for the MSc thesis *BIJEPA: Label-Free Representation Learning and Decomposition for Linear Programs on Bipartite Graphs* (Joachim Verschelde, Open University, 2026).
 
-### Using Docker (Recommended)
+This README is a reproducibility guide. For the research context, see the thesis.
 
-The easiest way to run this project is with Docker, which handles all dependencies automatically:
+---
+
+## 1. Environment
+
+All commands below assume the `graph-aug` conda environment is active.
+
+### Option A — Conda (used for all reported experiments)
 
 ```bash
-# Build and run the Docker container
+conda env create -f environment.yml
+conda activate graph-aug
+```
+
+### Option B — Docker
+
+```bash
 docker compose up --build
 ```
 
-For GPU support, uncomment the GPU-related sections in the compose.yaml file.
+Uncomment the GPU section in `compose.yaml` for CUDA.
 
-### Manual Installation
+### Working directory
 
-If you prefer to install dependencies manually, we recommend using conda:
+All `python -m ...` commands must be run **from the `src/` directory**:
 
-```bash
-# Create conda environment
-conda env create -f requirements.yml
-conda activate graph-aug
-
-# Install PyTorch Geometric extensions
-pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://pytorch-geometric.com/whl/torch-1.7.1+cu102.html
-```
-
-## JEPA Self-Supervised Pre-training (Sprint 1 Feature)
-
-KKT_MPNN now supports **JEPA (Joint-Embedding Predictive Architecture)** for self-supervised representation learning, enabling improved training through pre-training on the structure of LP problems.
-
-### What is JEPA?
-
-JEPA is a self-supervised learning method that learns representations by predicting embeddings of clean/lightly-masked inputs from heavily-masked inputs. Unlike reconstruction-based methods (like MAE), JEPA predicts in latent space, making it:
-- **More efficient**: 2.5-10x faster than reconstruction methods
-- **More effective**: Learns semantic structure rather than low-level details
-- **Flexible**: Works with both MLP and GNN architectures
-
-**Key References:**
-- I-JEPA: "Self-Supervised Learning from Images with a Joint-Embedding Predictive Architecture" (Assran et al., CVPR 2023)
-- BYOL: "Bootstrap Your Own Latent" (Grill et al., NeurIPS 2020)
-- SimSiam: "Exploring Simple Siamese Representation Learning" (Chen & He, CVPR 2021)
-
-### Training Modes
-
-JEPA supports **4 distinct training workflows** controlled by `jepa_pretrain_epochs` and `jepa_weight`:
-
-#### Mode 1: Baseline (KKT-only)
-No JEPA - traditional KKT training for comparison.
 ```bash
 cd src
-python train.py --batch_size 8 --epochs 20
-# No JEPA flags needed
 ```
 
-#### Mode 2: JEPA Pre-train → KKT Fine-tune
-Traditional SSL workflow: pre-train representations, then fine-tune for KKT.
+### Weights & Biases
+
+Training jobs log to W&B. Either run `wandb login` beforehand, or export `WANDB_MODE=offline` to disable uploads.
+
+---
+
+## 2. Reproducing the thesis end to end
+
+The pipeline has five stages. Each stage depends on the previous one.
+
+```
+(1) generate instances  →  (2) pretrain BiJEPA  →  (3) finetune (RQ1)
+                                              ↘  (4) precompute splits  →  (5) split finetune + RQ3
+```
+
+All stages are driven by YAML configs under `src/configs/`. Defaults in the configs match the settings reported in the thesis.
+
+### Stage 1 — Generate LP instances
+
 ```bash
-python train.py --batch_size 8 --epochs 20 \
-  --use_jepa --jepa_mode ema \
-  --jepa_pretrain_epochs 3 --jepa_weight 0
+cd src
+python -m jobs.generate_instances --config configs/data_generation/generate_instances_milp.yml
 ```
-- First 3 epochs: JEPA-only (representation learning)
-- Remaining epochs: KKT-only (task-specific fine-tuning)
 
-#### Mode 3: JEPA Pre-train → Joint Training (Recommended)
-Pre-train then maintain representations with auxiliary JEPA loss.
+Generates LP relaxations for four families — Independent Set (IS), Set Cover (SC), Combinatorial Auction (CA), Capacitated Facility Location (CFL) — at sizes `n ∈ {10, 50, 200}` (CA uses `{5, 25, 100}`), with a 70/15/15 train/val/test split. Instances are written to `./data/instances/milp/` by default. Adjust `n_instances`, sizes, or output path by editing the config.
+
+### Stage 2 — BiJEPA pretraining (RQ1, C1)
+
+Full-graph pretraining, one config per size:
+
 ```bash
-python train.py --batch_size 8 --epochs 20 \
-  --use_jepa --jepa_mode ema \
-  --jepa_pretrain_epochs 3 --jepa_weight 0.2
+python -m jobs.pretrain --config configs/pretrain/pretrain_ALL_10.yml
+python -m jobs.pretrain --config configs/pretrain/pretrain_ALL_50.yml
+python -m jobs.pretrain --config configs/pretrain/pretrain_ALL_200.yml
 ```
-- First 3 epochs: JEPA-only
-- Remaining epochs: KKT + 0.2×JEPA (prevents representation collapse)
 
-#### Mode 4: Joint Training from Start
-Combined JEPA+KKT from epoch 0 (faster but may learn less general representations).
+Split-graph pretraining (only needed for the `PRETRAINED` split variant in Stage 5):
+
 ```bash
-python train.py --batch_size 8 --epochs 20 \
-  --use_jepa --jepa_mode ema \
-  --jepa_pretrain_epochs 0 --jepa_weight 0.2
+python -m jobs.pretrain_split --config configs/pretrain_split/pretrain_split_bijepa.yml
+# optional warm-started variant:
+python -m jobs.pretrain_split --config configs/pretrain_split/pretrain_split_bijepa_warm.yml
 ```
 
-### MLP vs GNN Usage
+Checkpoints are saved to paths specified in the configs. Note the checkpoint paths — they are needed by finetuning configs.
 
-**MLP Architecture** (default):
+### Stage 3 — KKT-guided finetuning (RQ1, C2)
+
+For each `(family, size)` combination, four variants are compared:
+
+- `mlp_baseline` — dense MLP baseline
+- `gnn_baseline` — bipartite GNN trained from scratch
+- `gnn_frozen_encoder` — BiJEPA-initialized, encoder frozen
+- `gnn_full_finetune` — BiJEPA-initialized, full finetuning
+
+Config layout: `configs/finetune/finetune_<FAMILY>_<SIZE>/finetune_<FAMILY>_<SIZE>_<variant>.yml`.
+
+Example (one cell of the RQ1 grid):
+
 ```bash
-python train.py --use_jepa --jepa_mode ema \
-  --jepa_pretrain_epochs 3 --jepa_weight 0.2 \
-  --jepa_mask_entry_online 0.40 \
-  --jepa_mask_row_online 0.20 \
-  --jepa_mask_col_online 0.20
+python -m jobs.finetune --config configs/finetune/finetune_CA_50/finetune_CA_50_gnn_full_finetune.yml
 ```
 
-**GNN Architecture** (bipartite graphs):
+To reproduce the full RQ1 grid, run every config under `configs/finetune/`. Available family/size directories include `finetune_CA_{10,50,200}`, `finetune_ALL_{10,50,200}`, and the MILP grid under `configs/finetune/milp/{CA,CFL,IS,SC}/...`.
+
+Before running a finetune config that uses a BiJEPA checkpoint, make sure its `encoder_checkpoint:` field points at a checkpoint produced in Stage 2.
+
+### Stage 4 — Decomposition analysis (RQ2, C3)
+
+Precompute METIS partitions and halo subgraphs at each halo depth:
+
 ```bash
-python train.py --use_bipartite_graphs --use_jepa --jepa_mode ema \
-  --jepa_pretrain_epochs 3 --jepa_weight 0.2 \
-  --jepa_mask_ratio_nodes 0.3
+python -m jobs.precompute_splits --config configs/precompute_splits/block-5-halo-0-CA-100.yml
+python -m jobs.precompute_splits --config configs/precompute_splits/block-5-halo-1-CA-100.yml
+python -m jobs.precompute_splits --config configs/precompute_splits/block-5-halo-2-CA-100.yml
 ```
 
-### LP-Aware Masking Strategy (MLP Only)
+Evaluate embedding recovery vs. halo depth:
 
-For MLP models, JEPA uses **structure-aware masking** that respects LP semantics:
-
-**Three masking types:**
-1. **Row masking** (constraints): Masks entire constraint `A[i,:] + b[i]`
-2. **Column masking** (variables): Masks entire variable `A[:,j] + c[j]`
-3. **Entry masking**: Individual coefficients `A[i,j]`
-
-**Asymmetric views:**
-- **Online view** (context, heavier mask):
-  - 40% entries + 20% rows + 20% cols → ~60-70% of A masked
-  - Forces model to infer structure from partial information
-- **Target view** (lighter or clean):
-  - 10% entries + 5% rows + 5% cols → ~15-20% of A masked
-  - Or completely clean (all ratios = 0)
-
-**Safety guarantees:**
-- Always keeps ≥1 unmasked row AND ≥1 unmasked column
-- Only masks within real problem region (respects padding)
-- Maintains LP semantic coherence through tied masking
-
-**Why this works for LPs:**
-- Row masking: Forces model to infer constraint structure
-- Column masking: Forces model to infer variable relationships
-- Entry masking: Adds fine-grained perturbations
-- Tied masking: Maintains semantic coherence (constraint = A row + b value)
-
-### EMA vs SimSiam Mode
-
-**EMA Mode (Recommended)**:
 ```bash
---jepa_mode ema --ema_momentum 0.996
+python -m jobs.eval_halo_embedding_recovery
+python -m jobs.plot_halo_embedding_results
 ```
-- Uses separate target encoder updated via exponential moving average
-- More stable, better accuracy, prevents collapse better
-- Requires 2× memory (online + target models)
-- Best for research and when memory allows
 
-**SimSiam Mode**:
+Outputs: `src/eval_halo_embedding.csv`, `src/eval_halo_embedding_coupling.csv`, and plots used in the RQ2 analysis.
+
+### Stage 5 — Split architecture and RQ3 (C4)
+
+Train the three split variants at each halo depth `h ∈ {0, 1, 2}`:
+
 ```bash
---jepa_mode simsiam
-```
-- Shares encoder, uses stop-gradient instead of EMA
-- Lighter weight, lower memory usage
-- Sufficient for large models on standard problems
-- Best for production/resource-constrained settings
+# RAW split baseline (composer skipped)
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_RAW_h0.yml
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_RAW_h1.yml
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_RAW_h2.yml
 
-### Configuration Options
+# Block-GNN composer, from-scratch encoder
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_COMPOSER_h0.yml
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_COMPOSER_h1.yml
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_COMPOSER_h2.yml
 
-**Core JEPA settings:**
-```yaml
-jepa:
-  use_jepa: true              # Enable JEPA training
-  jepa_mode: "ema"            # "ema" or "simsiam"
-  jepa_weight: 0.2            # Weight for JEPA loss in joint training
-  jepa_pretrain_epochs: 3     # JEPA-only epochs before joint training
-  ema_momentum: 0.996         # EMA momentum (ema mode only)
+# Block-GNN composer, split-pretrained encoder (requires Stage 2 split pretraining)
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_PRETRAINED_h0.yml
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_PRETRAINED_h1.yml
+python -m jobs.finetune_split --config configs/finetune_splits/finetune_split_CA_200_PRETRAINED_h2.yml
 ```
 
-**MLP masking (LP-aware):**
-```yaml
-  # Online view (heavier mask - context)
-  jepa_mask_entry_online: 0.40
-  jepa_mask_row_online: 0.20
-  jepa_mask_col_online: 0.20
+Once all nine split runs and the full-graph baseline from Stage 3 are trained, produce the RQ3 comparison table and figure:
 
-  # Target view (lighter mask or clean)
-  jepa_mask_entry_target: 0.10  # Set to 0 for completely clean target
-  jepa_mask_row_target: 0.05
-  jepa_mask_col_target: 0.05
+```bash
+python -m jobs.run_rq3_experiments --output_dir ./results/rq3
 ```
 
-**GNN masking (node-level):**
-```yaml
-  jepa_mask_ratio_nodes: 0.3  # Fraction of nodes to mask
-```
+The script loads each checkpoint, runs `eval_epoch` to collect KKT metrics, and writes a CSV + grouped bar chart to `--output_dir`.
 
-**Optional augmentations:**
-```yaml
-  jepa_noisy_mask: false      # Add Gaussian noise at masked positions (vs zeros)
-  jepa_row_scaling: false     # Apply row scaling s_i ~ LogUniform(0.5, 2.0)
-```
+---
 
-### Recommended Defaults
+## 3. Loading a pretrained encoder in your own code
 
-- **JEPA weight**: 0.2 (Mode 3/4)
-- **EMA momentum**: 0.996 (standard for vision tasks)
-- **Pre-training epochs**: 3 (quick exploration) or 10-50 (thorough pre-training)
-- **MLP online mask**: 40% entries, 20% rows, 20% cols
-- **MLP target mask**: 10% entries, 5% rows, 5% cols (or 0 for clean)
-- **GNN mask ratio**: 0.3 (node-level)
-- **Mode**: Mode 3 (pre-train → joint) for best results
+Always go through the canonical helper so the online encoder (not the target) is loaded and config stays consistent:
 
-### Monitoring Training
-
-JEPA training logs separate losses to WandB:
-- `train/loss_jepa`: Self-supervised JEPA loss
-- `train/loss_kkt`: Task-specific KKT loss
-- `train/loss`: Combined loss (during joint training)
-
-During pre-training epochs, only `train/loss_jepa` is optimized. After pre-training, both losses are logged.
-
-### Checkpointing
-
-Checkpoints automatically save target model state when using EMA mode:
 ```python
-checkpoint = {
-    "model": online_model.state_dict(),
-    "target_model": target_model.state_dict(),  # Saved for EMA mode
-    "optimizer": optimizer.state_dict(),
-    # ...
-}
+from models.utils import LeJepaEncoderModule
+
+encoder = LeJepaEncoderModule.load_model_and_encoder(checkpoint_path, ...)
 ```
 
-SimSiam mode does not save a separate target model (encoder is shared).
+---
 
-## Optional Feature Normalization
+## 4. Config overrides
 
-Control whether problem instance features undergo min-max normalization:
+All jobs use `configargparse`, so any YAML field can be overridden on the command line, e.g.:
 
-**Enabled (default)** - scales features to [0, 1]:
 ```bash
-python generate_instances.py --problems CA --ca_sizes 5 --n_instances 1000
-# or explicitly:
-python generate_instances.py --normalize_features true
+python -m jobs.finetune \
+  --config configs/finetune/finetune_CA_50/finetune_CA_50_gnn_full_finetune.yml \
+  --epochs 100 --batch_size 32
 ```
 
-**Disabled** - preserves raw feature values:
+---
+
+## 5. Repo map
+
+```
+src/
+  configs/
+    data_generation/      Stage 1 configs
+    pretrain/             Stage 2 full-graph pretraining configs
+    pretrain_split/       Stage 2 split pretraining configs
+    finetune/             Stage 3 finetuning configs (LP + MILP grids)
+    precompute_splits/    Stage 4 partition/halo configs
+    finetune_splits/      Stage 5 split finetuning configs
+  data/                   Instance generators, METIS/halo dataset
+  models/                 GNN encoder, split/composer heads, LeJEPA loader
+  jobs/                   All entry points invoked via `python -m jobs.<name>`
+  metrics/                KKT residuals, objective/optimality gaps
+  sweeps/                 W&B sweep definitions
+  tests/                  Unit tests (pytest)
+  notebooks/              RQ1–RQ3 analysis notebooks
+```
+
+---
+
+## 6. Tests
+
 ```bash
-python generate_instances.py --normalize_features false
+cd src
+pytest tests/
 ```
-
-**When to disable normalization:**
-- Reproducing papers that don't normalize
-- Features already on similar scales
-- Studying impact of scale information on learning
-- Comparing with non-neural optimization methods
-
-**When to keep normalization (default):**
-- Features have vastly different scales
-- Using standard neural network architectures
-- General-purpose training (recommended for most use cases)
-
-## Method Implementation
-We utilize the bipartite graph convolution available on GitHub1 (Han et al., 2023), as the architecture for our MPNN. Two
-iterations of the process shown in Figure 2(a) are applied, resulting in two constraint-side and two variable-side convolutions.
-Our proposed model is implemented using the Transformer encoder code from GitHub2 (Wu et al., 2021), maintaining the
-same configuration. We developed two MPNN-based baselines, M MLP and M CNN. M MLP consists of four MLP layers
-with a hidden size of 128 and tanh activation, while M CNN includes four CNN layers followed by an MLP layer with
-ReLU activation. We utilized the positional encoding module from GitHub3 (Gorishniy et al., 2022).
-All ML models were trained using the proposed learning algorithm (Algorithm 1) with RMSprop (learning rate = 1e-4,
-epsilon = 1e-5, alpha = 0.99, weight decay = 1e-3). They were trained concurrently on 64 different instances with 5,000
-parameter updates for the results in Tables 1 and 3, and 10,000 for Table 2. Our RL algorithm is built upon the Actor-Critic
-implementation in PyTorch4 (Kostrikov, 2018), modified to be tailored for MILP problems.
-
-## References
-- https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail
-- https://github.com/yandex-research/rtdl-num-embeddings
-- https://github.com/ucbrise/graphtrans
-- https://github.com/sribdcn/Predict-and-Search_MILP_method
-
-##
-Test scalability (problems scale in size)
-Differt problem types (different types)
-compare with traditional solvers in runtime
-
-
-# IP And WA problem instances
-https://drive.google.com/file/d/1MytdY3IwX_aFRWdoc0mMfDN9Xg1EKUuq/view
